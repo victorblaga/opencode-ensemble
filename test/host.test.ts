@@ -38,3 +38,49 @@ test("a live foreign host blocks tools and same-name reconciliation", async () =
   await expect(executeTeamCreate(deps, { name: "alpha" }, "another-session")).rejects.toThrow("already exists")
   expect(deps.db.query("SELECT status FROM team").all()).toEqual([{ status: "active" }])
 })
+
+test("a returning lead broadcasts to workers after tool-triggered adoption with an empty registry", async () => {
+  const { executeTeamBroadcast } = await import("../src/tools/team-broadcast")
+  const deps = { ...setupDeps(), v2: true }
+  insertTeam(deps.db, "t", "alpha", "lead")
+  insertMember(deps.db, "t", "worker", "worker", "busy", "running")
+  insertMember(deps.db, "t", "stopped", "stopped", "shutdown", "idle")
+  deps.db.run("UPDATE team SET host_pid = NULL")
+  expect(deps.registry.listByTeam("t")).toEqual([])
+  expect(await executeTeamBroadcast(deps, { text: "Resume work" }, "lead")).toBe("Broadcast sent to 1 recipient.")
+  const calls = deps.client.calls.filter(call => call.method === "session.promptAsync")
+  expect(calls.map(call => call.args[0])).toMatchObject([{ sessionID: "worker" }])
+})
+
+test("adoption compare-and-set preserves a host that claimed the team after the read", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const { createDb } = await import("../src/db")
+  const { claimTeam } = await import("../src/host")
+  const dir = mkdtempSync(join(tmpdir(), "ensemble-host-claim-"))
+  const file = join(dir, "test.db")
+  const first = createDb(file)
+  const second = createDb(file)
+  try {
+    insertTeam(first, "host", "alpha", "lead")
+    insertMember(first, "host", "worker", "worker", "busy", "running")
+    first.run("UPDATE team SET host_pid = NULL")
+    const transaction = first.transaction.bind(first)
+    first.transaction = (fn) => {
+      const run = transaction(fn)
+      return (...args) => {
+        second.run("UPDATE team SET host_pid = ? WHERE id = 'host'", [process.ppid])
+        return run(...args)
+      }
+    }
+    expect(claimTeam(first, "host")).toEqual({ claimed: false, interrupted: [] })
+    expect(first.query("SELECT host_pid FROM team").get()).toEqual({ host_pid: process.ppid })
+    expect(first.query("SELECT status FROM team_member").get()).toEqual({ status: "busy" })
+    expect(first.query("SELECT COUNT(*) AS count FROM team_message").get()).toEqual({ count: 0 })
+  } finally {
+    first.close()
+    second.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

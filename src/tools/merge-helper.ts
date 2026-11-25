@@ -91,6 +91,15 @@ export async function deleteBranch(branch: string, cwd: string): Promise<boolean
   return true
 }
 
+/** Read the branch before removing a stopped worker's checkout. Detached HEAD has no branch. */
+export async function checkedOutMemberBranch(directory: string | null): Promise<string | undefined> {
+  if (!directory || !existsSync(join(directory, ".git"))) return undefined
+  const result = await runCommand(["git", "symbolic-ref", "--short", "--quiet", "HEAD"], { cwd: directory })
+  if (result.exitCode === 1 && !result.stderr) return undefined
+  if (result.exitCode !== 0) throw new Error(`Cannot read worktree branch at ${directory}: ${gitFailure(result)}`)
+  return result.stdout.trim()
+}
+
 /** Resolve the worker's final commit, or its stored ref if the checkout is gone. */
 export async function resolveMemberRef(member: { worktree_dir: string | null; worktree_branch: string | null }): Promise<string | undefined> {
   if (!member.worktree_dir || !existsSync(join(member.worktree_dir, ".git"))) return member.worktree_branch ?? undefined

@@ -6,20 +6,30 @@ import { createDb } from "../src/db"
 import { sendMessage, suppressMessageWake } from "../src/messaging"
 import { insertMember, insertTeam } from "./helpers"
 
+// Load the real script in a subprocess with shorter test constants.
+const waiter = `
+import runpy, sys
+script = runpy.run_path(sys.argv.pop(1))
+script["poll"].__globals__.update(POLL_SECONDS=0.02, BATCH_SECONDS=0.15)
+raise SystemExit(script["main"]())
+`
+
+function runWaiter(state: string, dbPath: string, team: string, ...args: string[]) {
+  const proc = Bun.spawn(["python3", "-c", waiter, "bin/ensemble-wait.py", "--db", dbPath, ...args], {
+    env: { ...process.env, HOME: state, XDG_STATE_HOME: state, OPENCODE_SESSION_ID: `lead-${team}` },
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  return { proc, text: new Response(proc.stdout).text() }
+}
+
 test("waiter claims its pid, batches messages, waits through shutdown and exits cleanly", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ensemble-waiter-"))
   const dbPath = join(dir, "test.db")
   const db = createDb(dbPath)
   const pidDir = join(dir, "opencode-ensemble", "waiters")
-  const children: ReturnType<typeof run>[] = []
-  function run(team: string, ...args: string[]) {
-    const proc = Bun.spawn(["python3", "bin/ensemble-wait.py", "--db", dbPath, ...args], {
-      env: { ...process.env, HOME: dir, XDG_STATE_HOME: dir, OPENCODE_SESSION_ID: `lead-${team}` },
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    return { proc, text: new Response(proc.stdout).text() }
-  }
+  const children: ReturnType<typeof runWaiter>[] = []
+  const run = (team: string, ...args: string[]) => runWaiter(dir, dbPath, team, ...args)
   try {
     mkdirSync(pidDir, { recursive: true })
     insertTeam(db, "message", "Message", "lead-message")
@@ -51,7 +61,7 @@ test("waiter claims its pid, batches messages, waits through shutdown and exits 
     expect(quiet.proc.exitCode).toBeNull()
     db.run("UPDATE team_member SET status = 'shutdown' WHERE team_id = 'quiet'")
     expect(await message.text).toContain("Message: messages")
-    expect(performance.now() - started).toBeGreaterThanOrEqual(15000)
+    expect(performance.now() - started).toBeGreaterThanOrEqual(150)
     expect(await quiet.text).toContain("Quiet: quiet.")
     expect(existsSync(stale)).toBe(false)
     expect(existsSync(join(pidDir, "quiet"))).toBe(false)
@@ -69,4 +79,36 @@ test("waiter claims its pid, batches messages, waits through shutdown and exits 
     db.close()
     rmSync(dir, { recursive: true, force: true })
   }
-}, 25000)
+})
+
+test("waiter releases its pid file when the team host dies or changes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ensemble-waiter-host-"))
+  const dbPath = join(dir, "test.db")
+  const db = createDb(dbPath)
+  const file = join(dir, "opencode-ensemble", "waiters", "host")
+  try {
+    insertTeam(db, "host", "Host", "lead-host")
+    insertMember(db, "host", "worker", "worker", "busy")
+    for (const next of [2147483647, process.ppid]) {
+      db.run("UPDATE team SET host_pid = ?", [process.pid])
+      const waiting = runWaiter(dir, dbPath, "host", "--max-minutes", "0.02")
+      const deadline = performance.now() + 800
+      while (!existsSync(file) && performance.now() < deadline) await Bun.sleep(10)
+      expect(existsSync(file)).toBe(true)
+      db.run("UPDATE team SET host_pid = ?", [next])
+      expect(await waiting.text).toContain("Host: host down")
+      expect(await waiting.proc.exited).toBe(0)
+      expect(existsSync(file)).toBe(false)
+    }
+    db.run("UPDATE team SET host_pid = 2147483647")
+    const orphan = runWaiter(dir, dbPath, "host", "--max-minutes", "0.02")
+    expect(await orphan.text).toContain("Host: host down")
+    expect(existsSync(file)).toBe(false)
+    db.run("UPDATE team SET host_pid = ?", [process.pid])
+    const resumed = runWaiter(dir, dbPath, "host", "--max-minutes", "0")
+    expect(await resumed.text).toContain("Host: timeout")
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

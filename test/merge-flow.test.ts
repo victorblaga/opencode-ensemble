@@ -608,6 +608,7 @@ async function withV2Repo(run: (deps: Deps, wt: string, branch: string) => Promi
   const deps = setupDeps()
   deps.directory = repo
   deps.v2 = true
+  deps.client.session.wait = async () => undefined
   try {
     await gitIn(root, "init", "--initial-branch=main", repo)
     await gitIn(repo, "config", "user.name", "Ensemble Test")
@@ -637,7 +638,7 @@ test("V2 merges the final commit after a graceful shutdown and removes its own b
   const { join } = await import("node:path")
   const { handleSessionStatusEvent } = await import("../src/hooks")
   await withV2Repo(async (deps, wt, branch) => {
-    deps.client.session.status = async () => ({ data: { worker: { type: "busy" } } })
+    deps.db.run("UPDATE team_member SET status = 'busy'")
     await Bun.write(join(wt, "first"), "first")
     await gitIn(wt, "add", ".")
     await gitIn(wt, "commit", "-m", "first")
@@ -647,7 +648,6 @@ test("V2 merges the final commit after a graceful shutdown and removes its own b
     await gitIn(wt, "commit", "-m", "last")
     deps.registry.register(teamId(deps, "test"), "worker", "worker")
     handleSessionStatusEvent(deps.db, deps.registry, "worker", "idle")
-    deps.client.session.status = async () => ({ data: {} })
     expect(await executeTeamMerge(deps, { member: "worker" }, "lead")).toContain("Merged worker")
     expect(await Bun.file(join(deps.directory, "last")).text()).toBe("last")
     expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain("nothing left")
@@ -701,7 +701,7 @@ test("V2 refuses to clean up an active shutdown request and keeps an unstoppable
   const { existsSync } = await import("node:fs")
   await withV2Repo(async (deps, wt) => {
     deps.db.run("UPDATE team_member SET status = 'shutdown_requested'")
-    deps.client.session.status = async () => ({ data: { worker: { type: "busy" } } })
+    deps.client.session.wait = async () => { throw new Error("foreground still running") }
     deps.client.session.abort = async () => { throw new Error("interrupt failed") }
     expect(await executeTeamShutdown(deps, { member: "worker", force: true }, "lead")).toContain("interrupt failed")
     expect(deps.db.query("SELECT status FROM team_member").get()).toEqual({ status: "shutdown_requested" })
@@ -760,5 +760,110 @@ test("purge deletes only recorded refs even when a team name overlaps the projec
     expect(await gitIn(repo, "branch", "--list", nested, unrecorded)).toContain(nested)
     expect(await gitIn(repo, "branch", "--list", unrecorded)).toContain(unrecorded)
     expect(db.query("SELECT id FROM team").all()).toEqual([{ id: "other" }])
+  })
+})
+
+test("V2 idle worktrees settle through OpenCode interrupt and wait without an active-list endpoint", async () => {
+  const { createV2Client } = await import("../src/v2-client")
+  const { join } = await import("node:path")
+  await withV2Repo(async (deps, wt) => {
+    const calls: string[] = []
+    const client = createV2Client({
+      session: {
+        interrupt: async () => { calls.push("interrupt"); return { interrupted: false } },
+        wait: async () => { calls.push("wait") },
+      },
+    } as never)
+    deps.client.session = client.session
+    await Bun.write(join(wt, "work"), "done")
+    await gitIn(wt, "add", ".")
+    await gitIn(wt, "commit", "-m", "worker")
+    expect(await executeTeamShutdown(deps, { member: "worker" }, "lead")).toContain("has been shut down")
+    expect(await executeTeamMerge(deps, { member: "worker" }, "lead")).toContain("Merged worker")
+    expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain("nothing left")
+    expect(calls).toEqual(["interrupt", "wait", "wait", "wait"])
+  })
+})
+
+test("V2 can shut down and archive a worker whose OpenCode session is gone", async () => {
+  const { createV2Client } = await import("../src/v2-client")
+  await withV2Repo(async (deps) => {
+    const gone = Object.assign(new Error("Session.NotFoundError"), { _tag: "Session.NotFoundError", sessionID: "worker" })
+    const client = createV2Client({
+      session: {
+        interrupt: async () => { throw gone },
+        wait: async () => { throw gone },
+      },
+    } as never)
+    deps.client.session = client.session
+    expect(await executeTeamShutdown(deps, { member: "worker", force: true }, "lead")).toContain("has been shut down")
+    expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain("nothing left")
+    expect(deps.db.query("SELECT status FROM team").get()).toEqual({ status: "archived" })
+  })
+})
+
+test("V2 cleanup deletes a legacy branch discovered in the checkout after merge", async () => {
+  await withV2Repo(async (deps, wt) => {
+    const name = `ensemble-${teamId(deps, "test")}-worker`
+    await gitIn(wt, "branch", "-m", name)
+    deps.db.run("UPDATE team_member SET status = 'shutdown', worktree_branch = NULL")
+    expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain("nothing left")
+    expect(await gitIn(deps.directory, "branch", "--list", "ensemble-*")).toBe("")
+  })
+})
+
+test("fast-forward squash refuses an unrelated staged file without applying the worker diff", async () => {
+  const { join } = await import("node:path")
+  const { mergeBranch } = await import("../src/tools/merge-helper")
+  await withV2Repo(async (deps, wt, branch) => {
+    await Bun.write(join(wt, "worker"), "work")
+    await gitIn(wt, "add", "worker")
+    await gitIn(wt, "commit", "-m", "worker")
+    await Bun.write(join(deps.directory, "pre-staged"), "keep staged")
+    await gitIn(deps.directory, "add", "pre-staged")
+    expect(await mergeBranch(branch, deps.directory)).toMatchObject({ ok: false, error: expect.stringContaining("staged") })
+    expect(await gitIn(deps.directory, "diff", "--cached", "--name-only")).toBe("pre-staged")
+    expect(await Bun.file(join(deps.directory, "worker")).exists()).toBe(false)
+  })
+})
+
+test("V2 team_merge refuses a running teammate before reading HEAD", async () => {
+  await withV2Repo(async (deps, wt) => {
+    deps.db.run("UPDATE team_member SET status = 'busy', worktree_dir = ?", [wt])
+    let waits = 0
+    deps.client.session.wait = async () => { waits++ }
+    await expect(executeTeamMerge(deps, { member: "worker" }, "lead")).rejects.toThrow("still active")
+    expect(waits).toBe(0)
+    deps.db.run("UPDATE team_member SET status = 'shutdown'")
+    deps.client.session.wait = async () => { throw new Error("foreground not settled") }
+    await expect(executeTeamMerge(deps, { member: "worker" }, "lead")).rejects.toThrow("Could not confirm")
+  })
+})
+
+test("V2 resolves the worktree HEAD even when the stored preserved ref is stale", async () => {
+  const { join } = await import("node:path")
+  const { resolveMemberRef } = await import("../src/tools/merge-helper")
+  await withV2Repo(async (deps, wt) => {
+    const stale = preservedFor(deps, "test", "worker")
+    await gitIn(deps.directory, "branch", stale)
+    await Bun.write(join(wt, "worker-final"), "last")
+    await gitIn(wt, "add", "worker-final")
+    await gitIn(wt, "commit", "-m", "worker final commit")
+    const head = await gitIn(wt, "rev-parse", "HEAD")
+    expect(head).not.toBe(await gitIn(deps.directory, "rev-parse", stale))
+    expect(await resolveMemberRef({ worktree_dir: wt, worktree_branch: stale })).toBe(head)
+    deps.db.run("UPDATE team_member SET status = 'shutdown', worktree_branch = ?", [stale])
+    expect(await executeTeamMerge(deps, { member: "worker" }, "lead")).toContain("Merged worker")
+    expect(await Bun.file(join(deps.directory, "worker-final")).text()).toBe("last")
+  })
+})
+
+test("V2 cleanup reports and records a non-team branch without deleting it", async () => {
+  await withV2Repo(async (deps, wt) => {
+    await gitIn(wt, "branch", "-m", "feature/keep")
+    deps.db.run("UPDATE team_member SET status = 'shutdown', worktree_branch = NULL")
+    expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain("retained branch feature/keep")
+    expect(await gitIn(deps.directory, "branch", "--list", "feature/keep")).toContain("feature/keep")
+    expect(deps.db.query("SELECT worktree_branch FROM team_member").get()).toEqual({ worktree_branch: "feature/keep" })
   })
 })

@@ -2,8 +2,8 @@ import type { ToolDeps } from "../types"
 import { requireLead, requireCanPurgeArchivedTeams, checkWorktreeDirty, countBranchCommits } from "./shared"
 import type { IsDirtyFn } from "./shared"
 import { spawnFailures } from "./team-spawn"
-import { getTeamResourceParts, mergeBranch, deleteBranch, preserveBranch, preservedBranchName, getOverlappingFiles, resolveMemberRef, teamWorktreeName } from "./merge-helper"
-import type { MergeBranchFn, DeleteBranchFn, OverlapCheckFn } from "./merge-helper"
+import { getTeamResourceParts, mergeBranch, deleteBranch, preserveBranch, preservedBranchName, getOverlappingFiles, resolveMemberRef, teamWorktreeName, checkedOutMemberBranch } from "./merge-helper"
+import type { MergeBranchFn, DeleteBranchFn, OverlapCheckFn, TeamResourceParts } from "./merge-helper"
 import { confirmStopped, stopV2Member } from "./team-shutdown"
 import { log } from "../log"
 import { runCommand } from "../process"
@@ -117,12 +117,12 @@ function getPurgeMemberResources(deps: ToolDeps, targets: PurgeTarget[]): PurgeM
   ).all(target.id) as PurgeMemberResource[])
 }
 
-function staleEnsembleBranchNames(resource: PurgeMemberResource): string[] {
+function teamBranchNames({ projectName, teamName, teamId }: TeamResourceParts, memberName: string): string[] {
   return [
-    teamWorktreeName(resource.project_name, resource.team_name, resource.team_id, resource.member_name),
-    `ensemble-${resource.team_id}-${resource.member_name}`,
-    `ensemble-${resource.team_name}-${resource.member_name}`,
-    `opencode/ensemble-${resource.team_name}-${resource.member_name}`,
+    teamWorktreeName(projectName, teamName, teamId, memberName),
+    `ensemble-${teamId}-${memberName}`,
+    `ensemble-${teamName}-${memberName}`,
+    `opencode/ensemble-${teamName}-${memberName}`,
   ]
 }
 
@@ -133,7 +133,9 @@ function isPreservedBranch(resource: PurgeMemberResource): boolean {
 }
 
 function isStaleEnsembleBranch(resource: PurgeMemberResource): boolean {
-  return resource.worktree_branch !== null && staleEnsembleBranchNames(resource).includes(resource.worktree_branch)
+  const { project_name, team_name, team_id, member_name, worktree_branch } = resource
+  return worktree_branch !== null
+    && teamBranchNames({ projectName: project_name, teamName: team_name, teamId: team_id }, member_name).includes(worktree_branch)
 }
 
 function validatePurgeResources(deps: ToolDeps, targets: PurgeTarget[]): void {
@@ -589,6 +591,7 @@ async function cleanupV2Worktrees(
     const preservedAlias = preservedBranchName(resource.projectName, resource.teamName, team.teamId, name)
     let kept: string | undefined
     try {
+      const checkoutBranch = await checkedOutMemberBranch(member.worktree_dir)
       const ref = member.worktree_branch ? await resolveMemberRef(member) : undefined
       if (ref && await countBranchCommits(ref, directory) !== 0) {
         const result = deps.config.mergeOnCleanup ? await merge(ref, directory) : undefined
@@ -614,7 +617,7 @@ async function cleanupV2Worktrees(
       if (member.worktree_dir) {
         // Keep the exact ref available to purge if removing a merged checkout fails.
         if (!kept && !member.worktree_branch) {
-          db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?", [liveBranch, team.teamId, name])
+          db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?", [checkoutBranch ?? liveBranch, team.teamId, name])
         }
         await deps.client.worktree.remove({ worktreeRemoveInput: { directory: member.worktree_dir, force: forceRemoval } })
         db.run("UPDATE team_member SET worktree_dir = NULL WHERE team_id = ? AND name = ?", [team.teamId, name])
@@ -624,12 +627,16 @@ async function cleanupV2Worktrees(
         db.run("UPDATE team_member SET workspace_id = NULL WHERE team_id = ? AND name = ?", [team.teamId, name])
       }
       if (member.worktree_dir || member.worktree_branch) {
-        const recorded = member.worktree_branch
         const legacyAlias = `ensemble/preserved/${resource.teamName}/${name}`
-        const oldPreserved = recorded === preservedAlias || recorded === legacyAlias ? recorded : undefined
-        const owned = new Set([liveBranch, oldPreserved])
-        for (const branch of owned) {
-          if (branch && branch !== kept && await branchExists(branch, directory) && !await delBranch(branch, directory)) {
+        const owned = new Set([...teamBranchNames(resource, name), preservedAlias, legacyAlias])
+        for (const branch of new Set([liveBranch, checkoutBranch, member.worktree_branch])) {
+          if (!branch || branch === kept || !await branchExists(branch, directory)) continue
+          const shared = db.query("SELECT 1 FROM team_member WHERE team_id != ? AND worktree_branch = ? LIMIT 1")
+            .get(team.teamId, branch)
+          if (!owned.has(branch) || shared) {
+            remaining.push(`${name}: retained branch ${branch} because ownership is not exclusive to this team.`)
+            kept ??= branch
+          } else if (!await delBranch(branch, directory)) {
             remaining.push(`${name}: could not delete branch ${branch}.`)
             kept ??= branch
           }

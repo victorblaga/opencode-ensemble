@@ -3,7 +3,6 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
 let client: { app: { log: (params: { service: string; level: string; message: string }) => Promise<unknown> } } | null = null
-let rotatedPath: string | undefined
 
 export function logPath(env: Record<string, string | undefined> = process.env): string {
   return join(env.XDG_STATE_HOME || join(env.HOME || homedir(), ".local", "state"), "opencode-ensemble", "ensemble.log")
@@ -18,11 +17,8 @@ export function log(msg: string): void {
   try {
     const file = logPath()
     mkdirSync(dirname(file), { recursive: true })
-    if (rotatedPath !== file) {
-      rotatedPath = file
-      if ((statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) {
-        renameSync(file, `${file}.1`)
-      }
+    if ((statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) {
+      renameSync(file, `${file}.1`)
     }
     appendFileSync(file, `${new Date().toISOString()} pid=${process.pid} ${msg.replace(/[\r\n]/g, " ")}\n`)
   } catch { /* Logging must not interrupt plugin work. */ }

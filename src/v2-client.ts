@@ -1,5 +1,7 @@
 import { realpath } from "node:fs/promises"
 import type { PermissionRule, PluginClient } from "./types"
+import { matches } from "./permissions"
+import { withTimeout } from "./util"
 import { log } from "./log"
 import { runCommand } from "./process"
 
@@ -24,7 +26,6 @@ export interface V2Context {
     interrupt(input: Record<string, unknown>): Promise<unknown>
     get(input: Record<string, unknown>): Promise<unknown>
     context(input: Record<string, unknown>): Promise<unknown[]>
-    active(): Promise<Record<string, { type: string }>>
     synthetic(input: Record<string, unknown>): Promise<unknown>
   }
   worktree: {
@@ -46,12 +47,6 @@ export interface V2Context {
 
 type PermissionRuleV2 = { action?: unknown; resource?: unknown; effect?: unknown }
 
-/** OpenCode wildcard match: `*` matches any run of characters. */
-function wildcardMatch(value: string, pattern: string): boolean {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
-  return new RegExp(`^${escaped}$`).test(value)
-}
-
 /**
  * True when an agent's own rules deny editing everywhere. OpenCode evaluates
  * the last matching rule, so this mirrors `evaluate("edit", "*")` over the
@@ -61,7 +56,7 @@ export function agentRulesAreReadOnly(rules: unknown): boolean | undefined {
   if (!Array.isArray(rules)) return undefined
   const match = [...(rules as PermissionRuleV2[])].reverse().find((rule) =>
     typeof rule?.action === "string" && typeof rule?.resource === "string"
-    && wildcardMatch("edit", rule.action) && (rule.resource === "*" || rule.resource === "**"))
+    && matches("edit", rule.action) && (rule.resource === "*" || rule.resource === "**"))
   if (!match) return undefined
   return match.effect === "deny"
 }
@@ -112,10 +107,7 @@ function joinParts(parts: Array<{ type: "text"; text: string }>): string {
  * - promptAsync: queue delivery wakes idle sessions; `agent` is applied via
  *   switchAgent first (V2 binds the agent at create/admission, and the shared
  *   create signature has no agent slot — only spawn passes one).
- * - abort: interrupt. status: derived from the active set — sessions absent
- *   from it read as idle, which matches the shutdown default (team-shutdown
- *   treats unknown as idle). OQ-V2-status: if V2 ever reports non-running
- *   states here, extend the mapping.
+ * - abort: interrupt. wait: waits for the session foreground drain.
  * - tui.*: no-op. Toasts and session-select move to the CLI (`./tui`) plugin
  *   in a later phase — the server plugin must not depend on a TUI.
  * - createIsolatedSession: V2 spawn provisions the worktree from the lead's
@@ -150,6 +142,7 @@ export function createV2Client(ctx: V2Context, deps: V2ClientDeps = {}): PluginC
   }
 
   return {
+    v2: true,
     leadWaiter: deps.leadWaiter ?? false,
     createIsolatedSession: async ({ parentID, name, title, permissions, signal }) => {
       const lead = await ctx.session.get({ sessionID: parentID }) as SessionInfo | undefined
@@ -303,11 +296,15 @@ export function createV2Client(ctx: V2Context, deps: V2ClientDeps = {}): PluginC
         return ctx.session.prompt({ sessionID: options.sessionID, text, delivery: "queue" })
       },
       abort: async (options) => ctx.session.interrupt({ sessionID: options.sessionID }),
-      status: async () => {
-        const active = await ctx.session.active()
-        const data: Record<string, { type: string }> = {}
-        for (const sessionID of Object.keys(active)) data[sessionID] = { type: "busy" }
-        return { data }
+      wait: async (options) => {
+        if (!ctx.session.wait) throw new Error("OpenCode does not provide session.wait")
+        try {
+          await withTimeout(ctx.session.wait(options), 5000, "OpenCode session.wait")
+        } catch (error) {
+          if (!error || typeof error !== "object" || !("_tag" in error) || error._tag !== "Session.NotFoundError") {
+            throw error
+          }
+        }
       },
       messages: async (options) => {
         const messages = await ctx.session.context({ sessionID: options.sessionID })

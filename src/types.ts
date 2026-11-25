@@ -39,7 +39,9 @@ export interface PermissionRule {
  * Makes mocking trivial in tests.
  */
 export interface PluginClient {
-  /** V2 waiter guidance is required in this plugin instance. Absent on V1. */
+  /** This client uses the OpenCode V2 plugin context. */
+  v2?: true
+  /** V2 waiter guidance is required in this plugin instance. */
   leadWaiter?: boolean
   /** V2 provisions and verifies an isolated child, or returns undefined if the lead has no Git commit. */
   createIsolatedSession?(options: {
@@ -72,7 +74,9 @@ export interface PluginClient {
       synthetic?: boolean
     }): Promise<unknown>
     abort(options: { sessionID: string }): Promise<unknown>
-    status(): Promise<{ data?: Record<string, { type: string }> }>
+    status?(): Promise<{ data?: Record<string, { type: string }> }>
+    /** V2 waits for the foreground drain. Missing sessions are already settled. */
+    wait?(options: { sessionID: string }): Promise<void>
     messages(options: { sessionID: string; limit?: number }): Promise<{ data?: Array<{ info: unknown; parts: unknown[] }> }>
     get(options: { sessionID: string }): Promise<{ data?: unknown }>
   }

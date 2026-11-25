@@ -7,7 +7,7 @@ import { deliverPrompt, type V2SessionPort } from "./v2-session"
 import type { V2Context } from "./v2-client"
 import { createV2Client } from "./v2-client"
 import { registerV2Tools } from "./v2-tools"
-import { onLeadIdle, wakeLeadIfPending } from "./wake"
+import { cancelHostedWake, onLeadIdle, wakeLeadIfPending } from "./wake"
 import type { PluginClient, ToolDeps } from "./types"
 import { ProgressTracker } from "./progress"
 import { checkToolIsolation, shouldNudgeIdleMember } from "./hooks"
@@ -26,6 +26,18 @@ import { registerPermissionPolicy } from "./permissions"
 import { waiterRequired } from "./waiter"
 import { log } from "./log"
 
+const LIFECYCLE_EVENTS = [
+  "session.created",
+  "session.status",
+  "session.idle",
+  "session.execution.started",
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+  "session.retry.scheduled",
+]
+const lifecycleEvents = new Set(LIFECYCLE_EVENTS)
+
 /** V2 setup context subset (structural, mock-friendly). */
 export interface V2SetupContext {
   location: { directory: string; project?: { id?: string } }
@@ -37,7 +49,7 @@ export interface V2SetupContext {
   worktree: V2Context["worktree"]
   permission: V2Context["permission"]
   event: {
-    subscribe(opts?: { signal?: AbortSignal }): AsyncIterable<V2EventLike>
+    subscribe(opts?: { signal?: AbortSignal; types?: string[] }): AsyncIterable<V2EventLike>
   }
   tool: {
     hook(name: string, cb: (event: never) => unknown): Promise<{ dispose(): Promise<void> }>
@@ -146,6 +158,7 @@ export async function setupEnsemble(
   let wakeClient: PluginClient | undefined
 
   const dispatch = async (event: V2EventLike): Promise<void> => {
+    if (!lifecycleEvents.has(event.type)) return
     if (event.type === "session.created") {
       dispatchV2Event(db, registry, tracker, event)
       return
@@ -168,6 +181,7 @@ export async function setupEnsemble(
       if (status === "idle" || status === "busy" || status === "retry") {
         db.run("UPDATE team SET lead_status = ? WHERE id = ?", [status, team.teamId])
       }
+      if (interrupted) cancelHostedWake(team.teamId)
       if (status === "idle" && !interrupted && wakeClient) {
         const finishedTurn = event.type === "session.execution.succeeded" || event.type === "session.execution.failed"
         const wake = finishedTurn
@@ -248,7 +262,7 @@ export async function setupEnsemble(
   // Live event loop — fire-and-forget; dispose() aborts it.
   void (async () => {
     try {
-      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal, types: LIFECYCLE_EVENTS })) {
         await dispatch(event)
       }
     } catch {
@@ -368,7 +382,7 @@ export async function setupEnsemble(
     config,
     progressTracker,
   }
-  await registerPermissionPolicy(ctx, db, registry)
+  await registerPermissionPolicy(ctx, db, registry, tracker)
   await registerV2Tools(ctx.tool, deps)
 
   ensureDashboard(db, config, { activityBuffer, client })

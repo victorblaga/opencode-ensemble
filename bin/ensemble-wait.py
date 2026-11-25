@@ -16,15 +16,14 @@ POLL_SECONDS = 2
 BATCH_SECONDS = 15
 
 
-def pid_alive(path):
+def pid_alive(pid):
+    if not pid or pid <= 0:
+        return False
     try:
-        pid = int(path.read_text())
-        if pid <= 0:
-            return False
         os.kill(pid, 0)
     except PermissionError:
         return True
-    except (ValueError, FileNotFoundError, ProcessLookupError, OverflowError):
+    except (ProcessLookupError, OverflowError):
         return False
     return True
 
@@ -43,7 +42,11 @@ def pid_lock(path):
 def acquire(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with pid_lock(path):
-        if pid_alive(path):
+        try:
+            current = int(path.read_text())
+        except (ValueError, FileNotFoundError):
+            current = None
+        if pid_alive(current):
             return False
         path.unlink(missing_ok=True)
         with path.open("x") as stream:
@@ -59,15 +62,17 @@ def log(state, message):
         pass
 
 
-def poll(db, team_id, max_minutes):
+def poll(db, team_id, host_pid, max_minutes):
     started = time.monotonic()
     messages_since = quiet_since = None
     first = True
     while True:
         now = time.monotonic()
-        team = db.execute("SELECT status FROM team WHERE id = ?", (team_id,)).fetchone()
+        team = db.execute("SELECT status, host_pid FROM team WHERE id = ?", (team_id,)).fetchone()
         if not team or team["status"] != "active":
             return "closed"
+        if team["host_pid"] != host_pid or not pid_alive(host_pid):
+            return "host down"
         if now - started >= max_minutes * 60:
             return "timeout"
         working = db.execute(
@@ -127,7 +132,7 @@ def main():
     try:
         db = sqlite3.connect(f"{args.db.resolve().as_uri()}?mode=ro", uri=True)
         db.row_factory = sqlite3.Row
-        team = db.execute(f"SELECT id, name FROM team WHERE {key} = ? AND status = 'active'", (identity,)).fetchone()
+        team = db.execute(f"SELECT id, name, host_pid FROM team WHERE {key} = ? AND status = 'active'", (identity,)).fetchone()
         if not team:
             print("This session leads no active Ensemble team.")
             return 2
@@ -138,7 +143,7 @@ def main():
         try:
             signal.signal(signal.SIGTERM, stop)
             log(state, f'waiter:start team={team["id"]}')
-            reason = poll(db, team["id"], args.max_minutes)
+            reason = poll(db, team["id"], team["host_pid"], args.max_minutes)
             digest(db, team, reason)
             log(state, f'waiter:exit team={team["id"]} reason={reason}')
         finally:

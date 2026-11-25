@@ -60,11 +60,11 @@ Choose an available model for the role and pass its complete ID in the `model` f
 
 On a T3-managed OpenCode host, copy the exact `python3 '<plugin path>/bin/ensemble-wait.py'` command from the lead's system prompt. Run it unmodified in the lead session using the `shell` tool with `background: true` after spawning and whenever teammates are still working at turn end. The waiter discovers the team from the lead's session ID. Optionally call `t3_background_wait` with the returned shell ID to show that the thread is working, then end the turn. Wait for the shell to resume the lead and avoid polling.
 
-Read the exit summary and the lead inbox. `messages` means the waiter batched new messages, and `quiet` means no teammate is working or finishing a graceful shutdown. `closed` means the team is inactive or gone. `timeout` is a periodic check-in. An already-running notice means the current waiter is still handling the wait. Use the task board and reports to decide what remains. Start a new waiter before ending the turn if teammates are still working.
+Read the exit summary and the lead inbox. `messages` means the waiter batched new messages, and `quiet` means no teammate is working or finishing a graceful shutdown. `closed` means the team is inactive or gone. `host down` means the team host stopped or changed. `timeout` is a periodic check-in. An already-running notice means the current waiter is still handling the wait. Use the task board and reports to decide what remains. Start a new waiter before ending the turn if teammates are still working.
 
 ## Teammate Permissions
 
-On OpenCode V2, teammates inherit permission decisions from the lead's current rules. An explicit lead denial applies even to a preapproved teammate action. Builders can use their permitted edit and shell tools in their worktree. Read-only reviewers cannot edit files or use the shell. Teammates cannot ask the user questions, request permission approvals, or use T3 orchestration tools. Send blockers to the lead with `team_message`.
+On OpenCode V2, teammates inherit permission decisions from the lead's current rules. An explicit lead denial applies even to a preapproved teammate action. Builders can use their permitted edit and shell tools in their worktree. Read-only reviewers cannot edit files or use the shell. Teammates cannot ask the user questions, request permission approvals, or use T3 orchestration tools. Send blockers to the lead with `team_message`. Saved “always allow” approvals in the lead session do not carry over.
 
 ## After a Host Restart
 
@@ -72,7 +72,7 @@ One server process owns each team. When that server stops, the returning lead ad
 
 ## Cleanup
 
-On OpenCode V2, shutdown must be confirmed before merging a teammate's final commit or removing its checkout. If cleanup cannot stop a teammate, it keeps the checkout and reports the blocker. Read the result for preserved branches, retained worktrees, and any operation that needs attention. Use `acknowledge_uncommitted: true` only after deciding to discard uncommitted teammate changes. Purge of archived teams requires the user's approval of the preview and deletes only exact recorded refs belonging to the selected team.
+On OpenCode V2, shutdown must be confirmed before merging a teammate's final commit or removing its checkout. Teammates must finish their background shell jobs and subagents before reporting. Shutdown confirmation covers the foreground session. If cleanup cannot stop a teammate, it keeps the checkout and reports the blocker. Read the result for preserved branches, retained worktrees, and any operation that needs attention. Use `acknowledge_uncommitted: true` only after deciding to discard uncommitted teammate changes. Purge of archived teams requires the user's approval of the preview and deletes only exact recorded refs belonging to the selected team.
 
 ## Load References As Needed
 

@@ -289,7 +289,7 @@ test("V2 waiter suppresses wake and re-arms one turn-end reminder", async () => 
   const deps = setupDeps()
   const team = "wait-reminder"
   const config = { ...deps.config, leadWaiter: "always" as const }
-  Object.assign(deps.client, { leadWaiter: true })
+  Object.assign(deps.client, { v2: true, leadWaiter: true })
   insertTeam(deps.db, team, "waiting", "lead")
   insertMember(deps.db, team, "worker", "worker", "shutdown_requested")
   deps.registry.register(team, "worker", "worker")
@@ -323,7 +323,7 @@ test("V2 waiter suppresses wake and re-arms one turn-end reminder", async () => 
 test("V2 worker broadcast routes the lead's copy exclusively through its inbox", async () => {
   const { executeTeamBroadcast } = await import("../src/tools/team-broadcast")
   const deps = { ...setupDeps(), v2: true }
-  Object.assign(deps.client, { leadWaiter: false })
+  Object.assign(deps.client, { v2: true, leadWaiter: false })
   insertTeam(deps.db, "broadcast", "test", "lead")
   insertMember(deps.db, "broadcast", "sender", "sender")
   insertMember(deps.db, "broadcast", "recipient", "recipient")
@@ -344,8 +344,8 @@ test("V2 uses one persistent wake claim across two database connections", async 
   const a = setupDeps(createDb(file))
   const b = setupDeps(createDb(file))
   try {
-    Object.assign(a.client, { leadWaiter: false })
-    Object.assign(b.client, { leadWaiter: false })
+    Object.assign(a.client, { v2: true, leadWaiter: false })
+    Object.assign(b.client, { v2: true, leadWaiter: false })
     insertTeam(a.db, "claim", "claim", "lead")
     for (const from of ["one", "two", "three", "four", "five"]) {
       sendMessage(a.db, { teamId: "claim", from, to: "lead", content: "result" })
@@ -361,4 +361,41 @@ test("V2 uses one persistent wake claim across two database connections", async 
     b.db.close()
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("a second database handle winning the wake claim suppresses the first handle's prompt", async () => {
+  const { createDb } = await import("../src/db")
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ensemble-wake-race-"))
+  const file = path.join(dir, "test.db")
+  const deps = setupDeps(createDb(file))
+  const competitor = createDb(file)
+  try {
+    Object.assign(deps.client, { v2: true })
+    insertTeam(deps.db, "wake-race", "race", "lead")
+    sendMessage(deps.db, { teamId: "wake-race", from: "worker", to: "lead", content: "result" })
+    const run = deps.db.run.bind(deps.db)
+    deps.db.run = (sql, ...args) => {
+      if (sql.startsWith("UPDATE team SET last_wake_at")) {
+        competitor.run("UPDATE team SET last_wake_at = 42 WHERE id = 'wake-race' AND last_wake_at = 0")
+      }
+      return run(sql, ...args)
+    }
+    expect(await wakeLeadIfPending(deps.client, deps.db, "wake-race")).toBe(false)
+    expect(wakes(deps)).toHaveLength(0)
+    expect(competitor.query("SELECT last_wake_at FROM team").get()).toEqual({ last_wake_at: 42 })
+  } finally {
+    deps.db.close()
+    competitor.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("waiter guidance alone does not opt a V1 client into hosted wake rules", async () => {
+  const deps = setupDeps()
+  Object.assign(deps.client, { leadWaiter: false })
+  insertTeam(deps.db, "v1-wake", "alpha", "lead")
+  deps.db.run("UPDATE team SET host_pid = ?", [process.ppid])
+  sendMessage(deps.db, { teamId: "v1-wake", from: "worker", to: "lead", content: "result" })
+  expect(await wakeLeadIfPending(deps.client, deps.db, "v1-wake")).toBe(true)
+  expect(wakes(deps)).toHaveLength(1)
 })

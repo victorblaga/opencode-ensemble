@@ -1,6 +1,6 @@
 import type { Database } from "./db"
 import { log } from "./log"
-import type { MemberRegistry } from "./state"
+import type { DescendantTracker, MemberRegistry } from "./state"
 import { findTeamBySession } from "./types"
 import type { V2SetupContext } from "./v2-setup"
 
@@ -22,6 +22,7 @@ interface PermissionSession {
   parentID?: string
   agent?: string
   permissions?: Rule[]
+  location?: { directory: string }
 }
 
 export function matches(value: string, pattern: string): boolean {
@@ -36,8 +37,15 @@ export function evaluate(rules: Rule[], action: string, resource: string): Rule[
   return rules.findLast(rule => matches(action, rule.action) && matches(resource, rule.resource))?.effect ?? "ask"
 }
 
-export async function registerPermissionPolicy(ctx: V2SetupContext, db: Database, registry: MemberRegistry): Promise<void> {
+export async function registerPermissionPolicy(
+  ctx: V2SetupContext, db: Database, registry: MemberRegistry, tracker?: DescendantTracker,
+): Promise<void> {
+  const parents = new Map<string, string | null>()
+  const hasActiveMembers = db.query(
+    "SELECT 1 FROM team t JOIN team_member m ON m.team_id = t.id WHERE t.status = 'active' LIMIT 1",
+  )
   await ctx.permission?.hook?.("evaluate", async (raw) => {
+    if (!hasActiveMembers.get()) return
     const event = raw as PermissionEvaluation
     let sessionID: string | undefined = event.sessionID
     let teamId: string | undefined
@@ -48,8 +56,14 @@ export async function registerPermissionPolicy(ctx: V2SetupContext, db: Database
         break
       }
       if (depth === 3) break
-      const session = await ctx.session.get({ sessionID }).catch(() => undefined) as PermissionSession | undefined
-      sessionID = session?.parentID
+      const knownParent: string | null | undefined = tracker?.getParent(sessionID) ?? parents.get(sessionID)
+      if (knownParent !== undefined) {
+        sessionID = knownParent ?? undefined
+      } else {
+        const session = await ctx.session.get({ sessionID }).catch(() => undefined) as PermissionSession | undefined
+        if (session) parents.set(sessionID, session.parentID ?? null)
+        sessionID = session?.parentID
+      }
     }
     if (!teamId) return
 
@@ -58,9 +72,11 @@ export async function registerPermissionPolicy(ctx: V2SetupContext, db: Database
       ? await ctx.session.get({ sessionID: team.lead_session_id }).catch(() => undefined) as PermissionSession | undefined
       : undefined
     const agent = lead?.agent
-      ? await ctx.agent?.get({ agentID: lead.agent }).catch(() => undefined) as { permissions?: Rule[] } | undefined
+      ? await ctx.agent?.get({ agentID: lead.agent, ...(lead.location ? { location: { directory: lead.location.directory } } : {}) })
+        .catch(() => undefined) as { data?: { permissions?: Rule[] }; permissions?: Rule[] } | undefined
       : undefined
-    const rules = [...(agent?.permissions ?? []), ...(lead?.permissions ?? [])]
+    const rules = [...(agent?.data?.permissions ?? agent?.permissions ?? []), ...(lead?.permissions ?? [])]
+    const originalEffect = event.effect
     const decisions = event.resources.map(resource => evaluate(rules, event.action, resource))
     if (decisions.includes("deny")) {
       event.effect = "deny"
@@ -73,6 +89,6 @@ export async function registerPermissionPolicy(ctx: V2SetupContext, db: Database
         event.message = "Nobody can approve requests for teammates. This action is not pre-approved for the team. Continue without it, or report the blocker to the lead with team_message."
       }
     }
-    log(`permission: team=${teamId} session=${event.sessionID} action=${event.action} decision=${event.effect}`)
+    if (event.effect !== originalEffect) log(`permission: team=${teamId} session=${event.sessionID} action=${event.action} decision=${event.effect}`)
   })
 }

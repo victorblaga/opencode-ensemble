@@ -86,7 +86,7 @@ function scheduleCooldownRetry(
   options: WakeLeadOptions,
   delayMs: number,
 ): void {
-  const state = stateFor(db, client.leadWaiter !== undefined)
+  const state = stateFor(db, client.v2 === true)
   if (state.timers.has(teamId)) return
   const timer = setTimeout(() => {
     state.timers.delete(teamId)
@@ -117,7 +117,7 @@ export async function wakeLeadIfPending(
   teamId: string,
   options: WakeLeadOptions = {},
 ): Promise<boolean> {
-  const hosted = client.leadWaiter !== undefined
+  const hosted = client.v2 === true
   if (hosted && (teamOwnership(db, teamId) !== "mine" || observeWaiter(teamId))) return false
   const force = !hosted && options.force
   const state = stateFor(db, hosted)
@@ -126,6 +126,11 @@ export async function wakeLeadIfPending(
   const before = pendingLeadWake(db, teamId)
   if (!before) {
     log(`wake:skip team=${teamId} reason=no-unseen`)
+    return false
+  }
+
+  if (!force && leadIsBusy(before.leadStatus)) {
+    log(`wake:skip team=${teamId} reason=lead-busy status=${before.leadStatus}`)
     return false
   }
 
@@ -140,18 +145,6 @@ export async function wakeLeadIfPending(
 
   state.inFlight.add(teamId)
   try {
-    // A busy lead is left alone: queueing a wake behind its current turn can
-    // produce an empty wake if the lead drains the inbox before the queued
-    // message is processed (#57). Both hosts retry on the lead's next idle
-    // event (V1 in index.ts, V2 in v2-setup.ts), which re-checks unseen
-    // messages first. lead_status is persisted so this decision is reliable
-    // from teammate instances and between LLM steps. System/error
-    // notifications can force the wake.
-    if (!force && leadIsBusy(before.leadStatus)) {
-      log(`wake:skip team=${teamId} reason=lead-busy status=${before.leadStatus}`)
-      return false
-    }
-
     // On V1 a wake is a normal user turn, so pass the lead's current agent and
     // model explicitly to stop OpenCode falling back to Build/default (#37).
     // V2 wakes are synthetic and ignore both, so skip the lookup there.
@@ -184,7 +177,7 @@ export async function wakeLeadIfPending(
       [stamp, teamId, after.lastWakeAt],
     ).changes
     if (!claimed) return false
-    const waiterHint = client.leadWaiter && workingCount(db, teamId) > 0
+    const waiterHint = hosted && client.leadWaiter && workingCount(db, teamId) > 0
       ? ` When you finish this turn, start the waiter with shell background: true: \`${waiterCommand()}\`.`
       : ""
     const senderText = after.senders.length > 0 ? ` from ${after.senders.join(", ")}` : ""
@@ -202,6 +195,13 @@ export async function wakeLeadIfPending(
   } finally {
     state.inFlight.delete(teamId)
   }
+}
+
+/** Drop a scheduled retry when the user stops the lead. Later messages may wake it. */
+export function cancelHostedWake(teamId: string): void {
+  const timer = hostedState.timers.get(teamId)
+  if (timer) clearTimeout(timer)
+  hostedState.timers.delete(teamId)
 }
 
 /** A live waiter owns the next lead resume and re-arms its reminder. */

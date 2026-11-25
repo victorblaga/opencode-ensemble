@@ -1,5 +1,5 @@
 import type { ToolDeps, PermissionRule } from "../types"
-import { validateMemberName } from "../util"
+import { validateMemberName, withTimeout } from "../util"
 import { requireLead } from "./shared"
 import { claimTask } from "./team-claim"
 import { notifyLead } from "../notify"
@@ -47,16 +47,6 @@ function isWorktreeDirectory(dir: string): boolean {
 }
 
 /** Race a promise against a timeout. Throws if the timeout fires first. Cleans up timer on resolution. */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>
-  return Promise.race([
-    promise.finally(() => clearTimeout(timer)),
-    new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-    }),
-  ])
-}
-
 /**
  * Execute the team_spawn tool. Creates a child session and starts a teammate.
  * By default, each teammate gets their own git worktree for file isolation.

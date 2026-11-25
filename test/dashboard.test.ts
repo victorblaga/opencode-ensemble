@@ -728,6 +728,10 @@ test("hosted dashboard waits for a team, retakes the port, and refreshes its cli
   insertTeam(db, "dead", "stopped", "dead")
   db.run("UPDATE team SET host_pid = 2147483647 WHERE id = 'dead'")
   insertMember(db, "dead", "worker", "worker-session", "busy", "running")
+  const invalidBind = { ...config, dashboardHost: "192.0.2.10" }
+  await expect(startDashboard(db, address.port, { host: invalidBind.dashboardHost })).rejects.toMatchObject({ code: "EADDRNOTAVAIL" })
+  ensureDashboard(db, invalidBind, { client: first, retryMs: 30 })
+  await Bun.sleep(30)
   ensureDashboard(db, config, { client: first, retryMs: 30 })
   await Bun.sleep(40)
   await new Promise<void>(resolve => holder.close(() => resolve()))

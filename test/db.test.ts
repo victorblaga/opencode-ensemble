@@ -400,3 +400,22 @@ test("migration 14 skips work committed by another connection before the write l
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("fresh database retries WAL initialization when SQLite returns busy", () => {
+  const exec = Database.prototype.exec
+  let walAttempts = 0
+  Database.prototype.exec = function (sql) {
+    if (sql === "PRAGMA journal_mode=WAL" && ++walAttempts === 1) {
+      throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" })
+    }
+    return exec.call(this, sql)
+  }
+  try {
+    const db = createDb(":memory:")
+    expect(walAttempts).toBe(2)
+    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: MIGRATIONS.length })
+    db.close()
+  } finally {
+    Database.prototype.exec = exec
+  }
+})

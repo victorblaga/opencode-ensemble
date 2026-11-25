@@ -1149,7 +1149,6 @@ describe("V2 isolated teammate spawn", () => {
         switchAgent: async () => undefined,
         switchModel: async () => undefined,
         interrupt: async () => undefined,
-        active: async () => ({}),
         context: async () => [],
         synthetic: async () => undefined,
       },

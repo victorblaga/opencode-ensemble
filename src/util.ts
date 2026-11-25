@@ -58,3 +58,13 @@ export function validateMemberName(name: string): string | undefined {
   if (!NAME_PATTERN.test(name)) return "Member name must be lowercase alphanumeric with hyphens only"
   return undefined
 }
+
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    }),
+  ])
+}

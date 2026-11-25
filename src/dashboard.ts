@@ -391,12 +391,16 @@ function toDashboardServer(server: Server): DashboardServer {
  * Returns the server instance, or null if skipped.
  */
 export async function startDashboard(db: Database, port: number, options?: DashboardOptions): Promise<DashboardServer | null> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = createServer((req, res) => handleDashboardRequest(db, port, req, res, options))
 
     server.once("error", (err: NodeJS.ErrnoException) => {
-      log(`dashboard:bind-failed port=${port} err=${err.message}`)
-      resolve(null)
+      if (err.code === "EADDRINUSE") {
+        log(`dashboard:port-in-use port=${port}`)
+        resolve(null)
+      } else {
+        reject(err)
+      }
     })
 
     server.listen(port, options?.host ?? "127.0.0.1", () => {
@@ -427,18 +431,23 @@ export function ensureDashboard(db: Database, config: Required<EnsembleConfig>, 
   if (bindingOrListening) return
 
   const tryBind = async (retry: boolean): Promise<void> => {
-    if (!db.query("SELECT 1 FROM team WHERE status = 'active' AND host_pid = ? LIMIT 1").get(process.pid)) {
+    try {
+      if (!db.query("SELECT 1 FROM team WHERE status = 'active' AND host_pid = ? LIMIT 1").get(process.pid)) {
+        bindingOrListening = false
+        return
+      }
+      bindingOrListening = true
+      hostedOptions.host = config.dashboardHost
+      hostedOptions.activityBuffer = deps.activityBuffer
+      if (await startDashboard(db, config.dashboardPort, hostedOptions)) {
+        if (retry) log(`dashboard:retaken port=${config.dashboardPort}`)
+        return
+      }
+      setTimeout(() => { void tryBind(true) }, deps.retryMs ?? 15_000).unref()
+    } catch (error) {
       bindingOrListening = false
-      return
+      log(`dashboard:bind-failed port=${config.dashboardPort} err=${error instanceof Error ? error.message : String(error)}`)
     }
-    bindingOrListening = true
-    hostedOptions.host = config.dashboardHost
-    hostedOptions.activityBuffer = deps.activityBuffer
-    if (await startDashboard(db, config.dashboardPort, hostedOptions)) {
-      if (retry) log(`dashboard:retaken port=${config.dashboardPort}`)
-      return
-    }
-    setTimeout(() => { void tryBind(true) }, deps.retryMs ?? 15_000).unref()
   }
   void tryBind(false)
 }

@@ -31,7 +31,7 @@ function mockCtx() {
       },
       interrupt: async (input: Record<string, unknown>) => {
         calls.push({ domain: "session", method: "interrupt", input })
-        return { aborted: true }
+        return { interrupted: true }
       },
       get: async (input: Record<string, unknown>) => {
         calls.push({ domain: "session", method: "get", input })
@@ -41,9 +41,8 @@ function mockCtx() {
         calls.push({ domain: "session", method: "context", input })
         return [{ id: "msg_1", type: "user" }]
       },
-      active: async () => {
-        calls.push({ domain: "session", method: "active", input: {} })
-        return { ses_busy1: { type: "running" } }
+      wait: async (input: Record<string, unknown>) => {
+        calls.push({ domain: "session", method: "wait", input })
       },
     },
     permission: {
@@ -185,13 +184,11 @@ describe("v2-client adapter (issue #36, DRY: reuses all tool logic)", () => {
     expect(calls[0]).toMatchObject({ domain: "session", method: "interrupt" })
   })
 
-  test("session.status derives busy/idle from the active set", async () => {
-    const { ctx } = mockCtx()
+  test("session.wait settles the foreground via the V2 context", async () => {
+    const { calls, ctx } = mockCtx()
     const client = createV2Client(ctx as never)
-    const status = await client.session.status()
-    expect(status.data?.["ses_busy1"]?.type).toBe("busy")
-    // Absent key reads as idle — team-shutdown treats unknown as idle.
-    expect(status.data?.["ses_idle1"]).toBeUndefined()
+    await client.session.wait?.({ sessionID: "ses_child" })
+    expect(calls).toEqual([{ domain: "session", method: "wait", input: { sessionID: "ses_child" } }])
   })
 
   test("tui calls resolve without a server round-trip (toasts live in the CLI plugin)", async () => {
@@ -265,16 +262,16 @@ describe("createV2Client — OpenCode 2.0.19+ compatibility (issue #40)", () => 
     expect(worktreeCalls.map((c) => (c.input as { projectID?: string }).projectID)).toEqual(["prj_1", "prj_1", "prj_1"])
   })
 
-  test("agent.readOnly reads the agent's last matching edit rule", async () => {
+  test("agent.readOnly evaluates wrapped rules with the OpenCode wildcard matcher", async () => {
     const { ctx } = mockCtx()
     const rulesFor: Record<string, unknown> = {
-      reviewer: [{ action: "*", resource: "*", effect: "allow" }, { action: "edit", resource: "*", effect: "deny" }],
+      reviewer: [{ action: "*", resource: "*", effect: "allow" }, { action: "ed?t", resource: "*", effect: "deny" }],
       builder: [{ action: "edit", resource: "*", effect: "deny" }, { action: "*", resource: "*", effect: "allow" }],
       plain: [{ action: "read", resource: "*", effect: "allow" }],
     }
     const client = createV2Client({
       ...ctx,
-      agent: { get: async (input: Record<string, unknown>) => ({ permissions: rulesFor[input["agentID"] as string] }) },
+      agent: { get: async (input: Record<string, unknown>) => ({ location: { directory: "/lead" }, data: { permissions: rulesFor[input["agentID"] as string] } }) },
     } as never)
     expect(await client.agent?.readOnly("reviewer")).toBe(true)
     expect(await client.agent?.readOnly("builder")).toBe(false)

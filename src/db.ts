@@ -97,16 +97,35 @@ export function getDbPath(env: Record<string, string | undefined> = process.env)
   return path.join(home, ".config", "opencode", "ensemble.db")
 }
 
+/** Switching a fresh database to WAL can return busy before SQLite's busy handler runs. */
+function enableWal(db: Database): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      db.exec("PRAGMA journal_mode=WAL")
+      return
+    } catch (error) {
+      const sqlite = error as { code?: string; errcode?: number }
+      if (attempt === 4 || (sqlite.code !== "SQLITE_BUSY" && sqlite.errcode !== 5)) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+    }
+  }
+}
+
 /**
  * Create and initialize a SQLite database at the given path.
  * Applies all pending migrations and enables WAL mode.
  */
 export function createDb(path: string): Database {
   const db = openDatabase(path)
-  db.exec("PRAGMA busy_timeout=5000")
-  db.exec("PRAGMA journal_mode=WAL")
-  db.exec("PRAGMA foreign_keys=ON")
-  applyMigrations(db)
+  try {
+    db.exec("PRAGMA busy_timeout=5000")
+    enableWal(db)
+    db.exec("PRAGMA foreign_keys=ON")
+    applyMigrations(db)
+  } catch (error) {
+    db.close()
+    throw error
+  }
   instance = db
   return db
 }

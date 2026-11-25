@@ -47,13 +47,11 @@ export async function executeTeamBroadcast(
     }
   }
 
-  // Add all members except sender
-  const members = deps.registry.listByTeam(teamInfo.teamId)
-  for (const member of members) {
-    if (member.sessionId !== sessionId) {
-      recipients.push({ name: member.memberName, sessionId: member.sessionId })
-    }
-  }
+  const members = deps.db.query(
+    `SELECT name, session_id AS sessionId FROM team_member
+     WHERE team_id = ? AND session_id != ? AND status NOT IN ('shutdown', 'error')`,
+  ).all(teamInfo.teamId, sessionId) as typeof recipients
+  recipients.push(...members)
 
   // Fire-and-forget: deliver to all recipients. Message is already persisted in DB.
   // Skip completed teammates to prevent re-waking them (issue #3).

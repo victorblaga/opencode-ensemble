@@ -19,7 +19,7 @@ function mockSetupCtx() {
       interrupt: async () => undefined,
       get: async () => ({ id: "ses_x" }),
       context: async () => [],
-      active: async () => ({}),
+      wait: async () => undefined,
       hook: hook("session"),
     },
     permission: {
@@ -277,4 +277,135 @@ describe("v2-setup (issue #36)", () => {
     expect(handle.db.query("SELECT lead_status FROM team").get()).toEqual({ lead_status: "idle" })
     await handle.dispose()
   })
+})
+
+test("a lead interrupt cancels a queued wake for messages still unseen", async () => {
+  const { createV2Client } = await import("../src/v2-client")
+  const { sendMessage } = await import("../src/messaging")
+  const { wakeLeadIfPending } = await import("../src/wake")
+  const { ctx } = mockSetupCtx()
+  const wakes: unknown[] = []
+  ctx.session.synthetic = async input => { wakes.push(input) }
+  const handle = await setupEnsemble(ctx, { dbPath: ":memory:", dashboardPort: 0 })
+  try {
+    seedLeadAndMember(handle)
+    sendMessage(handle.db, { teamId: "team1", from: "alice", to: "lead", content: "results" })
+    handle.db.run("UPDATE team SET last_wake_at = ?", [Date.now()])
+    const client = createV2Client(ctx)
+    expect(await wakeLeadIfPending(client, handle.db, "team1", { cooldownMs: 40 })).toBe(false)
+    await handle.dispatch({ type: "session.execution.interrupted", data: { sessionID: "ses_lead" } })
+    await Bun.sleep(65)
+    expect(wakes).toHaveLength(0)
+    expect(await wakeLeadIfPending(client, handle.db, "team1", { cooldownMs: 0 })).toBe(true)
+    expect(wakes).toHaveLength(1)
+  } finally {
+    await handle.dispose()
+    handle.db.close()
+  }
+})
+
+test("only lead context adopts the orphan and presents its interrupted worker notice", async () => {
+  const { ctx, hooks } = mockSetupCtx()
+  const handle = await setupEnsemble(ctx, { dbPath: ":memory:", dashboardPort: 0 })
+  try {
+    seedLeadAndMember(handle)
+    handle.db.run("UPDATE team SET host_pid = NULL")
+    handle.registry.unregisterTeam("team1")
+    const context = hooks.session?.[0]
+    expect(context).toBeDefined()
+    const worker = { sessionID: "ses_alice", system: [] as Array<{ text: string }> }
+    await context?.(worker as never)
+    expect(worker.system).toEqual([])
+    expect(handle.db.query("SELECT host_pid FROM team").get()).toEqual({ host_pid: null })
+    const lead = { sessionID: "ses_lead", system: [] as Array<{ text: string }> }
+    await context?.(lead as never)
+    expect(lead.system[0]?.text).toContain("Interrupted teammates: alice")
+    expect(handle.db.query("SELECT host_pid, lead_status FROM team").get()).toEqual({ host_pid: process.pid, lead_status: "busy" })
+    expect(handle.db.query("SELECT status, execution_status FROM team_member").get()).toEqual({ status: "ready", execution_status: "cancelled" })
+  } finally {
+    await handle.dispose()
+    handle.db.close()
+  }
+})
+
+test("unrelated session deltas do not look up team membership", async () => {
+  const { ctx } = mockSetupCtx()
+  const handle = await setupEnsemble(ctx, { dbPath: ":memory:", dashboardPort: 0 })
+  const query = handle.db.query.bind(handle.db)
+  let queries = 0
+  handle.db.query = (sql) => { queries++; return query(sql) }
+  try {
+    await handle.dispatch({ type: "session.text.delta", data: { sessionID: "unrelated" } })
+    expect(queries).toBe(0)
+    await handle.dispatch({ type: "session.created", data: { sessionID: "child", parentID: "parent" } })
+    expect(handle.tracker.getParent("child")).toBe("parent")
+  } finally {
+    await handle.dispose()
+    handle.db.close()
+  }
+})
+
+test.each(["team_create", "existing team at setup"])("the V2 dashboard starts from %s", async (entrypoint) => {
+  // Use a separate host process for each case: the dashboard binds once per process.
+  const script = `
+    import { mkdtempSync, rmSync } from "node:fs"
+    import { createServer } from "node:net"
+    import { tmpdir } from "node:os"
+    import { join } from "node:path"
+    import { createDb } from "./src/db"
+    import { setupEnsemble } from "./src/v2-setup"
+    import { insertTeam } from "./test/helpers"
+
+    const entrypoint = process.argv.at(-1)
+    const dir = mkdtempSync(join(tmpdir(), "ensemble-dashboard-entrypoint-"))
+    const dbPath = join(dir, "test.db")
+    const probe = createServer()
+    await new Promise(resolve => probe.listen(0, "127.0.0.1", resolve))
+    const port = probe.address().port
+    await new Promise(resolve => probe.close(resolve))
+    const defs = new Map()
+    const hook = async () => ({ dispose: async () => {} })
+    const ctx = {
+      location: { directory: dir },
+      options: {},
+      session: { hook, wait: async () => {}, interrupt: async () => ({ interrupted: false }) },
+      permission: { hook },
+      shell: { hook },
+      tool: {
+        hook,
+        transform: async (register) => register({
+          add: (def) => defs.set(def.name, def),
+        }),
+      },
+      rpc: { register: async () => ({}) },
+      event: { subscribe: async function* () {} },
+    }
+    if (entrypoint === "existing team at setup") {
+      const db = createDb(dbPath)
+      insertTeam(db, "existing", "alpha", "lead")
+      db.close()
+    }
+    const handle = await setupEnsemble(ctx, { dbPath, dashboardPort: port })
+    try {
+      if (entrypoint === "team_create") {
+        await defs.get("team_create").execute({ name: "alpha" }, { sessionID: "lead" })
+      }
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const result = await fetch("http://127.0.0.1:" + port + "/api/state").catch(() => undefined)
+        if (result?.ok) {
+          if ((await result.json()).teams[0]?.name !== "alpha") throw new Error("Wrong team")
+          break
+        }
+        if (attempt === 39) throw new Error("Dashboard did not start for " + entrypoint)
+        await Bun.sleep(10)
+      }
+    } finally {
+      await handle.dispose()
+      handle.db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  `
+  const proc = Bun.spawn([process.execPath, "-e", script, "--", entrypoint], { stderr: "pipe", stdout: "pipe" })
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+  expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
 })

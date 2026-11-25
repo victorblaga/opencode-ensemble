@@ -35,7 +35,7 @@ function mockDeps() {
       interrupt: async () => undefined,
       get: async () => ({ id: "ses_x" }),
       context: async () => [],
-      active: async () => ({}),
+      wait: async () => undefined,
     },
     permission: {
       rules: async () => undefined,

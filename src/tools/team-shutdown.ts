@@ -30,7 +30,9 @@ export async function executeTeamShutdown(
   const force = args.force ?? false
 
   const alreadyRequested = member.status === "shutdown_requested"
-  const isIdle = await confirmStopped(deps.client, member.session_id)
+  const isIdle = !alreadyRequested && !force && (deps.v2
+    ? member.status !== "busy"
+    : await v1SessionIdle(deps.client, member.session_id))
   if (alreadyRequested || isIdle || force) {
     if (deps.v2) {
       const error = await stopV2Member(deps, teamInfo.teamId, args.member, member.session_id)
@@ -79,27 +81,38 @@ export async function executeTeamShutdown(
   return `Shutdown requested for ${args.member}. They will finish current work and shut down. Call team_shutdown with force: true to abort immediately.`
 }
 
-/** An unavailable active-set lookup cannot confirm that the writer stopped. */
-export async function confirmStopped(client: PluginClient, sessionId: string): Promise<boolean> {
+async function v1SessionIdle(client: PluginClient, sessionId: string): Promise<boolean> {
   try {
-    const { data } = await client.session.status()
-    const status = data?.[sessionId]
+    if (!client.session.status) return false
+    const status = (await client.session.status()).data?.[sessionId]
     return !status || status.type === "idle"
   } catch {
     return false
   }
 }
 
+/** Confirm the foreground drain finished before inspecting or removing its worktree. */
+export async function confirmStopped(client: PluginClient, sessionId: string): Promise<boolean> {
+  try {
+    if (!client.session.wait) return false
+    await client.session.wait({ sessionID: sessionId })
+    return true
+  } catch {
+    return false
+  }
+}
+
 export async function stopV2Member(deps: ToolDeps, teamId: string, name: string, sessionId: string): Promise<string | undefined> {
-  // V2 interrupt stops the session drain and leaves its Git worktree in place.
+  let interruptError: string | undefined
   try {
     await deps.client.session.abort({ sessionID: sessionId })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    log(`shutdown:interrupt-failed team=${teamId} member=${name} err=${message}`)
-    return message
+    interruptError = err instanceof Error ? err.message : String(err)
+    log(`shutdown:interrupt-failed team=${teamId} member=${name} err=${interruptError}`)
   }
-  if (!await confirmStopped(deps.client, sessionId)) return "OpenCode still reports the session active, or its status could not be confirmed."
+  if (!await confirmStopped(deps.client, sessionId)) {
+    return interruptError ?? "OpenCode could not confirm the session stopped."
+  }
   recordShutdown(deps, teamId, name)
   return undefined
 }
