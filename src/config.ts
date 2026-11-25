@@ -1,3 +1,4 @@
+import { log } from "./log"
 import { readFileSync } from "node:fs"
 import path from "node:path"
 
@@ -111,7 +112,7 @@ function readConfigFile(filePath: string): Partial<EnsembleConfig> {
     return result
   } catch (err) {
     if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return {}
-    console.warn(`[ensemble] Invalid config at ${filePath}, using defaults`)
+    log(`Invalid config at ${filePath}, using defaults`)
     return {}
   }
 }

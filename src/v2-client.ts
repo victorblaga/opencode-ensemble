@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises"
 import type { PermissionRule, PluginClient } from "./types"
-import { vlog } from "./log"
+import { log } from "./log"
 import { runCommand } from "./process"
 
 type SessionInfo = {
@@ -212,7 +212,7 @@ export function createV2Client(ctx: V2Context, deps: V2ClientDeps = {}): PluginC
       } catch (error) {
         const residuals = await rollback()
         const message = [String(error), ...residuals].join(". ")
-        if (signal.aborted || residuals.length) vlog(`Isolated spawn "${name}" failed: ${message}`)
+        if (signal.aborted || residuals.length) log(`Isolated spawn "${name}" failed: ${message}`)
         throw new Error(message)
       }
 

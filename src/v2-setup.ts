@@ -22,7 +22,7 @@ import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionCo
 import { startDashboard, type DashboardServer } from "./dashboard"
 import { EnsembleRpc, emitMemberEvent, emitNoticeEvent } from "./v2-rpc"
 import { isWorktreeInstance } from "./util"
-import { vlog } from "./log"
+import { log } from "./log"
 
 /** V2 setup context subset (structural, mock-friendly). */
 export interface V2SetupContext {
@@ -96,6 +96,7 @@ export async function setupEnsemble(
   options: SetupOptions = {},
 ): Promise<EnsembleHandle> {
   const db = createDb(options.dbPath ?? getDbPath())
+  log(`init:instance directory=${ctx.location.directory}`)
   const config = loadConfig(ctx.location.directory)
   // A stale busy status from a previous process would suppress wakes forever.
   // Reset active teams to idle at startup; the next status event corrects it.
@@ -111,7 +112,7 @@ export async function setupEnsemble(
   // restart are visible again. Without this, their events are ignored and
   // teams freeze silently after every server restart (seen live 2026-09-14).
   const rehydrated = rehydrateRegistry(db, registry)
-  if (rehydrated > 0) vlog(`init:registry:rehydrated members=${rehydrated}`)
+  if (rehydrated > 0) log(`init:registry:rehydrated members=${rehydrated}`)
 
   /** Send the idle-without-report nudge once per member. */
   const nudgeMember = (teamId: string, memberName: string, sessionId: string): void => {
@@ -128,13 +129,13 @@ export async function setupEnsemble(
       teamId,
       memberName,
     ])
-    vlog(`nudge:idle-without-report name=${memberName}`)
+    log(`nudge:idle-without-report name=${memberName}`)
     void deliverPrompt(
       ctx.session as unknown as V2SessionPort,
       sessionId,
       "[System]: You completed your work but did not report results. Send your findings to the lead via team_message now.",
     ).catch((err) => {
-      vlog(`nudge:idle-without-report:failed name=${memberName} err=${err instanceof Error ? err.message : String(err)}`)
+      log(`nudge:idle-without-report:failed name=${memberName} err=${err instanceof Error ? err.message : String(err)}`)
     })
   }
 
@@ -191,7 +192,7 @@ export async function setupEnsemble(
         .get(sessionID) as { id: string } | null
       if (leadTeam) {
         wakeLeadIfPending(wakeClient, db, leadTeam.id).catch((err) => {
-          vlog(`wake-lead:failed err=${err instanceof Error ? err.message : String(err)}`)
+          log(`wake-lead:failed err=${err instanceof Error ? err.message : String(err)}`)
         })
       }
     }
@@ -262,7 +263,7 @@ export async function setupEnsemble(
       },
     })
   } catch (err) {
-    vlog(`init:rpc:failed err=${err instanceof Error ? err.message : String(err)}`)
+    log(`init:rpc:failed err=${err instanceof Error ? err.message : String(err)}`)
   }
 
   // Live event loop — fire-and-forget; dispose() aborts it.
@@ -303,7 +304,7 @@ export async function setupEnsemble(
       // model stays in the correction loop. Fail-open by design: a
       // non-fumble error is returned untouched.
       if (enrichToolError(event.tool, event.error, event.input)) {
-        vlog(`tool-arg-hint:fired tool=${event.tool} session=${event.sessionID}`)
+        log(`tool-arg-hint:fired tool=${event.tool} session=${event.sessionID}`)
       }
     }
     if (event.tool === "question") {
@@ -336,7 +337,7 @@ export async function setupEnsemble(
       teamInfo.role === "lead"
         ? buildLeadSystemPrompt(db, teamInfo.teamId, config)
         : buildTeammateSystemPrompt(db, teamInfo.teamId, teamInfo.memberName ?? "unknown", config)
-    vlog(`system-prompt:injected role=${teamInfo.role} len=${prompt.length}`)
+    log(`system-prompt:injected role=${teamInfo.role} len=${prompt.length}`)
     event.system.push({ type: "text", text: prompt })
     if (teamInfo.role === "member") {
       // V2 invokes plugin tools through Code Mode, not direct calls —
@@ -386,7 +387,7 @@ export async function setupEnsemble(
   const dashboardPort = options.dashboardPort ?? config.dashboardPort
   if (dashboardPort !== 0 && !isWorktreeInstance(ctx.location.directory)) {
     dashboard = await startDashboard(db, dashboardPort, { activityBuffer, client, host: config.dashboardHost }).catch((err) => {
-      vlog(`init:dashboard:failed err=${err instanceof Error ? err.message : String(err)}`)
+      log(`init:dashboard:failed err=${err instanceof Error ? err.message : String(err)}`)
       return null
     })
   }

@@ -1,22 +1,32 @@
-/** Plugin logger using the v2 SDK's structured logging API (flat params, no body wrapper). */
-let _client: { app: { log: (params: { service: string; level: string; message: string }) => Promise<unknown> } } | null = null
+import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs"
+import { homedir } from "node:os"
+import { dirname, join } from "node:path"
 
-/** Set the SDK client for logging. Called once during plugin init with the raw v2 client. */
-export function initLog(client: unknown): void {
-  _client = client as typeof _client
+let client: { app: { log: (params: { service: string; level: string; message: string }) => Promise<unknown> } } | null = null
+let rotatedPath: string | undefined
+
+export function logPath(env: Record<string, string | undefined> = process.env): string {
+  return join(env.XDG_STATE_HOME || join(env.HOME || homedir(), ".local", "state"), "opencode-ensemble", "ensemble.log")
 }
 
-/** Log a message via the SDK's app.log API so it appears in OpenCode's structured logs. */
+export function initLog(rawClient: unknown): void {
+  client = rawClient as typeof client
+}
+
+/** Write to the plugin log and, on V1, mirror to OpenCode. */
 export function log(msg: string): void {
-  if (!_client) return
-  _client.app.log({ service: "ensemble", level: "info", message: msg }).catch(() => {})
-}
-
-/**
- * V2 fallback logger. The V2 plugin context exposes no app.log, so server
- * log lines go to stdout with a prefix (the host captures plugin stdout
- * into its own log). Used only by V2 setup paths.
- */
-export function vlog(msg: string): void {
-  console.log(`[ensemble] ${msg}`)
+  try {
+    const file = logPath()
+    mkdirSync(dirname(file), { recursive: true })
+    if (rotatedPath !== file) {
+      rotatedPath = file
+      if ((statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) {
+        renameSync(file, `${file}.1`)
+      }
+    }
+    appendFileSync(file, `${new Date().toISOString()} pid=${process.pid} ${msg.replace(/[\r\n]/g, " ")}\n`)
+  } catch { /* Logging must not interrupt plugin work. */ }
+  try {
+    client?.app.log({ service: "ensemble", level: "info", message: msg }).catch(() => {})
+  } catch { /* The host log is best effort. */ }
 }
