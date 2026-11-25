@@ -218,6 +218,8 @@ export const MIGRATIONS: string[] = [
   // system prompt and team_results, but never count toward a wake, so the idle
   // backstop cannot queue one that lands after cleanup (#48).
   `ALTER TABLE team_message ADD COLUMN wake_suppressed INTEGER NOT NULL DEFAULT 0;`,
+  // Migration 14: Record the V2 server that hosts the team.
+  `ALTER TABLE team ADD COLUMN host_pid INTEGER;`,
 ]
 
 /**
@@ -236,14 +238,22 @@ export function applyMigrations(db: Database): void {
     const { foreign_keys: foreignKeys } = db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }
 
     db.exec("PRAGMA foreign_keys = OFF")
-    db.exec("BEGIN IMMEDIATE")
     try {
-      if (migration) db.exec(migration)
-      db.exec(`PRAGMA user_version = ${i + 1}`)
-      db.exec("COMMIT")
-    } catch (err) {
-      db.exec("ROLLBACK")
-      throw err
+      db.exec("BEGIN IMMEDIATE")
+      try {
+        const { user_version: locked } = db.query("PRAGMA user_version").get() as { user_version: number }
+        if (locked > MIGRATIONS.length) {
+          throw new Error(`Database schema version ${locked} is newer than this plugin supports (${MIGRATIONS.length}). Upgrade opencode-ensemble before continuing.`)
+        }
+        if (locked === i) {
+          if (migration) db.exec(migration)
+          db.exec(`PRAGMA user_version = ${i + 1}`)
+        }
+        db.exec("COMMIT")
+      } catch (err) {
+        db.exec("ROLLBACK")
+        throw err
+      }
     } finally {
       db.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"}`)
     }

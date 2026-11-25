@@ -51,8 +51,8 @@ function mockSetupCtx() {
 
 function seedLeadAndMember(handle: Awaited<ReturnType<typeof setupEnsemble>>) {  const now = Date.now()
   handle.db.run(
-    "INSERT INTO team (id, name, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, 'active', 0, ?, ?)",
-    ["team1", "alpha", "ses_lead", now, now],
+    "INSERT INTO team (id, name, lead_session_id, status, delegate, time_created, time_updated, host_pid) VALUES (?, ?, ?, 'active', 0, ?, ?, ?)",
+    ["team1", "alpha", "ses_lead", now, now, process.pid],
   )
   handle.db.run(
     "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
@@ -245,55 +245,49 @@ describe("v2-setup (issue #36)", () => {
     expect(extractQuestionOutput(undefined)).toBe("")
   })
 
-  test("setup rehydrates registry and nudges already-idle silent members", async () => {
+  test("foreign teams are untouched at startup and on status events, but ancestry is tracked", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
     const { join } = await import("node:path")
-    const dbPath = join(tmpdir(), `ensemble-rehydrate-${Date.now()}.db`)
-    // Seed a file DB directly (simulates state from before a restart).
-    const { createDb } = await import("../src/db")
-    const seed = createDb(dbPath)
-    const now = Date.now()
-    seed.run(
-      "INSERT INTO team (id, name, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, 'active', 0, ?, ?)",
-      ["team1", "alpha", "ses_lead", now, now],
-    )
-    seed.run(
-      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'ready', 'idle', ?, ?)",
-      ["team1", "alice", "ses_alice", now, now],
-    )
-    seed.close()
+    const dir = mkdtempSync(join(tmpdir(), "ensemble-foreign-"))
+    const dbPath = join(dir, "test.db")
+    try {
+      const { ctx } = mockSetupCtx()
+      const seed = await setupEnsemble(ctx, { dbPath, dashboardPort: 0 })
+      seedLeadAndMember(seed)
+      seed.db.run("UPDATE team SET host_pid = ?, lead_status = 'busy'", [process.ppid])
+      await seed.dispose()
+      seed.db.close()
 
-    const prompts: unknown[] = []
+      const { ctx: foreign } = mockSetupCtx()
+      const deliveries: unknown[] = []
+      foreign.session.prompt = async (input) => { deliveries.push(input); return { id: "msg" } }
+      foreign.session.synthetic = async (input) => { deliveries.push(input); return { id: "msg" } }
+      const handle = await setupEnsemble(foreign, { dbPath, dashboardPort: 0 })
+      expect(handle.registry.getBySession("ses_alice")).toBeUndefined()
+      await handle.dispatch({ type: "session.created", data: { sessionID: "child", parentID: "ses_alice" } })
+      await handle.dispatch({ type: "session.execution.succeeded", data: { sessionID: "ses_alice" } })
+      await handle.dispatch({ type: "session.execution.interrupted", data: { sessionID: "ses_lead" } })
+      expect(handle.tracker.getParent("child")).toBe("ses_alice")
+      expect(handle.db.query("SELECT host_pid, lead_status FROM team").get()).toEqual({ host_pid: process.ppid, lead_status: "busy" })
+      expect(handle.db.query("SELECT status FROM team_member").get()).toEqual({ status: "busy" })
+      expect(deliveries).toEqual([])
+      await handle.dispose()
+      handle.db.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("interruption returns both a hosted member and the lead to idle", async () => {
     const { ctx } = mockSetupCtx()
-    const session = ctx.session as unknown as {
-      prompt: (input: unknown) => Promise<unknown>
-    }
-    session.prompt = async (input: unknown) => {
-      prompts.push(input)
-      return { id: "msg_1" }
-    }
-    const handle = await setupEnsemble(ctx, { dbPath, dashboardPort: 0 })
-    // Registry rehydrated from SQLite despite the fresh process.
-    expect(handle.registry.getBySession("ses_alice")?.memberName).toBe("alice")
-    // Already-idle silent member got its one nudge on startup.
-    const nudges = prompts.filter((p) => JSON.stringify(p).includes("did not report"))
-    expect(nudges.length).toBe(1)
-    expect(JSON.stringify(nudges[0])).toContain("ses_alice")
+    const handle = await setupEnsemble(ctx, { dbPath: ":memory:", dashboardPort: 0 })
+    seedLeadAndMember(handle)
+    handle.db.run("UPDATE team SET lead_status = 'busy'")
+    await handle.dispatch({ type: "session.execution.interrupted", data: { sessionID: "ses_alice" } })
+    await handle.dispatch({ type: "session.execution.interrupted", data: { sessionID: "ses_lead" } })
+    expect(handle.db.query("SELECT status FROM team_member").get()).toEqual({ status: "ready" })
+    expect(handle.db.query("SELECT lead_status FROM team").get()).toEqual({ lead_status: "idle" })
     await handle.dispose()
-    // A second setup (hot-reload) must NOT nudge again within the hour.
-    const prompts2: unknown[] = []
-    const { ctx: ctxReload } = mockSetupCtx()
-    const sessionReload = ctxReload.session as unknown as {
-      prompt: (input: unknown) => Promise<unknown>
-    }
-    sessionReload.prompt = async (input: unknown) => {
-      prompts2.push(input)
-      return { id: "msg_1" }
-    }
-    const handle2 = await setupEnsemble(ctxReload, { dbPath, dashboardPort: 0 })
-    expect(prompts2.filter((p) => JSON.stringify(p).includes("did not report")).length).toBe(0)
-    await handle2.dispose()
-    const { rm } = await import("node:fs/promises")
-    await rm(dbPath, { force: true })
   })
 })

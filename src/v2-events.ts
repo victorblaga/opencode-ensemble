@@ -50,6 +50,7 @@ export function dispatchV2Event(
       return handleSessionStatusEvent(db, registry, data.sessionID, "busy")
     case "session.execution.succeeded":
     case "session.execution.failed":
+    case "session.execution.interrupted":
       // Ended means idle even on failure — the idle-without-report nudge then
       // prompts the teammate to report, which surfaces the failure to the lead.
       if (!data.sessionID) return undefined

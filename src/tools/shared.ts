@@ -1,5 +1,6 @@
 import type { ToolDeps } from "../types"
 import { findTeamBySession } from "../types"
+import { requireHostedHere } from "../host"
 import { runCommand } from "../process"
 
 /** Function type for dirty worktree check — injectable for testing. */
@@ -31,22 +32,24 @@ export async function checkWorktreeDirty(dir: string): Promise<boolean> {
 
 /** Validate that the session belongs to the team lead. Throws if not. */
 export function requireLead(
-  deps: Pick<ToolDeps, "db" | "registry">,
+  deps: Pick<ToolDeps, "db" | "registry" | "v2">,
   sessionId: string,
 ): { teamId: string; teamName: string } {
   const teamInfo = findTeamBySession(deps.db, deps.registry, sessionId)
   if (!teamInfo) throw new Error("This session is not in a team. Use team_create first.")
   if (teamInfo.role !== "lead") throw new Error("Only the team lead can use this tool.")
+  if (deps.v2) requireHostedHere(deps.db, teamInfo.teamId, "lead")
   return { teamId: teamInfo.teamId, teamName: teamInfo.teamName }
 }
 
 /** Validate that the session belongs to any team member (lead or teammate). Throws if not. */
 export function requireTeamMember(
-  deps: Pick<ToolDeps, "db" | "registry">,
+  deps: Pick<ToolDeps, "db" | "registry" | "v2">,
   sessionId: string,
 ): { teamId: string; teamName: string; role: "lead" | "member"; memberName?: string } {
   const teamInfo = findTeamBySession(deps.db, deps.registry, sessionId)
   if (!teamInfo) throw new Error("This session is not in a team.")
+  if (deps.v2) requireHostedHere(deps.db, teamInfo.teamId, teamInfo.role)
   return teamInfo
 }
 

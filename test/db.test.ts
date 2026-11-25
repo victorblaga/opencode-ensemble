@@ -375,3 +375,28 @@ describe("getDbPath", () => {
     expect(result).toContain(path.join(".config", "opencode", "ensemble.db"))
   })
 })
+
+test("migration 14 skips work committed by another connection before the write lock", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const dir = mkdtempSync(path.join(tmpdir(), "ensemble-migrations-"))
+  const file = path.join(dir, "test.db")
+  const first = new Database(file)
+  const second = new Database(file)
+  try {
+    for (const migration of MIGRATIONS.slice(0, 13)) first.exec(migration)
+    first.exec("PRAGMA user_version = 13")
+    const exec = first.exec.bind(first)
+    first.exec = (sql) => {
+      if (sql === "BEGIN IMMEDIATE") applyMigrations(second)
+      return exec(sql)
+    }
+    applyMigrations(first)
+    expect(first.query("PRAGMA user_version").get()).toEqual({ user_version: 14 })
+    expect(first.query("SELECT name FROM pragma_table_info('team') WHERE name = 'host_pid'").all()).toEqual([{ name: "host_pid" }])
+  } finally {
+    first.close()
+    second.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

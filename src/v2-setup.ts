@@ -13,6 +13,7 @@ import { ProgressTracker } from "./progress"
 import { checkToolIsolation, shouldNudgeIdleMember } from "./hooks"
 import { hasReportedCompletion } from "./messaging"
 import { enrichToolError } from "./tool-arg-hint"
+import { claimTeam, teamOwnership } from "./host"
 import { rehydrateRegistry } from "./recovery"
 import { findTeamBySession } from "./types"
 import { loadConfig } from "./config"
@@ -98,9 +99,6 @@ export async function setupEnsemble(
   const db = createDb(options.dbPath ?? getDbPath())
   log(`init:instance directory=${ctx.location.directory}`)
   const config = loadConfig(ctx.location.directory)
-  // A stale busy status from a previous process would suppress wakes forever.
-  // Reset active teams to idle at startup; the next status event corrects it.
-  db.run("UPDATE team SET lead_status = 'idle' WHERE status = 'active'")
   const registry: MemberRegistry = new MemberRegistryImpl()
   const tracker: DescendantTracker = new DescendantTrackerImpl()
   const purgeApprovals = new PendingPurgeApprovals()
@@ -111,7 +109,7 @@ export async function setupEnsemble(
   // Rehydrate the in-memory registry from SQLite so members from before a
   // restart are visible again. Without this, their events are ignored and
   // teams freeze silently after every server restart (seen live 2026-09-14).
-  const rehydrated = rehydrateRegistry(db, registry)
+  const rehydrated = rehydrateRegistry(db, registry, process.pid)
   if (rehydrated > 0) log(`init:registry:rehydrated members=${rehydrated}`)
 
   /** Send the idle-without-report nudge once per member. */
@@ -121,9 +119,6 @@ export async function setupEnsemble(
     if (!shouldNudgeIdleMember(db, teamId, memberName)) return
     if (hasReportedCompletion(db, teamId, memberName)) return
     nudgedMembers.add(nudgeKey)
-    // Persist so hot-reloads don't re-nudge: every setup re-runs the sweep,
-    // and without this each file save re-nudged every silent member (seen
-    // live 2026-09-14 — 40+ nudges on one scout).
     db.run("UPDATE team_member SET last_nudged_at = ? WHERE team_id = ? AND name = ?", [
       Date.now(),
       teamId,
@@ -139,17 +134,6 @@ export async function setupEnsemble(
     })
   }
 
-  // Startup sweep: members already idle (e.g. finished while the plugin was
-  // down) never emit a fresh transition, so nudge them now. Skip members
-  // nudged within the hour — the guard survives reloads via the DB column.
-  const nudgeCutoff = Date.now() - 60 * 60 * 1000
-  const silent = db.query(
-    `SELECT tm.team_id, tm.name, tm.session_id FROM team_member tm
-     JOIN team t ON tm.team_id = t.id
-     WHERE t.status = 'active' AND tm.status = 'ready'
-       AND (tm.last_nudged_at IS NULL OR tm.last_nudged_at < ?)`,
-  ).all(nudgeCutoff) as Array<{ team_id: string; name: string; session_id: string }>
-  for (const member of silent) nudgeMember(member.team_id, member.name, member.session_id)
   const rateLimiter = new TokenBucket({
     capacity: config.rateLimitCapacity,
     refillRate: 2,
@@ -160,49 +144,38 @@ export async function setupEnsemble(
   let wakeClient: PluginClient | undefined
 
   const dispatch = async (event: V2EventLike): Promise<void> => {
-    const transition = dispatchV2Event(db, registry, tracker, event)
-
-    // Persist the lead's status so teammate instances can make reliable,
-    // synchronous wake decisions from the shared DB (#57). session.active()
-    // can report idle between LLM steps, which queued wakes behind a busy turn.
-    const sessionID = event.data?.sessionID
-    const rawStatus = event.type === "session.status"
-      ? (typeof event.data?.status === "string" ? event.data.status : event.data?.status?.type)
-      : event.type === "session.idle"
-        || event.type === "session.execution.succeeded"
-        || event.type === "session.execution.failed"
-        ? "idle"
-        : event.type === "session.execution.started"
-          ? "busy"
-          : event.type === "session.retry.scheduled"
-            ? "retry"
-            : undefined
-    if (sessionID && (rawStatus === "idle" || rawStatus === "busy" || rawStatus === "retry")) {
-      const leadTeam = db.query("SELECT id FROM team WHERE lead_session_id = ? AND status = 'active'")
-        .get(sessionID) as { id: string } | null
-      if (leadTeam) db.run("UPDATE team SET lead_status = ? WHERE id = ?", [rawStatus, leadTeam.id])
+    if (event.type === "session.created") {
+      dispatchV2Event(db, registry, tracker, event)
+      return
     }
+    const sessionID = event.data?.sessionID
+    if (!sessionID) return
+    const team = findTeamBySession(db, registry, sessionID)
+    if (!team || teamOwnership(db, team.teamId) !== "mine") return
+    const interrupted = event.type === "session.execution.interrupted"
 
-    // Lead idle backstop (V2). The wake path skips a busy lead so it cannot
-    // queue behind the current turn; this re-checks after the turn and wakes
-    // only if messages are still unseen. Without it, a message arriving while
-    // the lead is busy would sit until the user sent another prompt.
-    if (rawStatus === "idle" && sessionID && wakeClient) {
-      const leadTeam = db.query("SELECT id FROM team WHERE lead_session_id = ? AND status = 'active'")
-        .get(sessionID) as { id: string } | null
-      if (leadTeam) {
-        wakeLeadIfPending(wakeClient, db, leadTeam.id).catch((err) => {
+    if (team.role === "lead") {
+      const raw = event.data?.status
+      const status = event.type === "session.status"
+        ? (typeof raw === "string" ? raw : raw?.type)
+        : event.type === "session.idle" || event.type === "session.execution.succeeded"
+          || event.type === "session.execution.failed" || interrupted
+          ? "idle"
+          : event.type === "session.execution.started" ? "busy"
+            : event.type === "session.retry.scheduled" ? "retry" : undefined
+      if (status === "idle" || status === "busy" || status === "retry") {
+        db.run("UPDATE team SET lead_status = ? WHERE id = ?", [status, team.teamId])
+      }
+      if (status === "idle" && !interrupted && wakeClient) {
+        wakeLeadIfPending(wakeClient, db, team.teamId).catch((err) => {
           log(`wake-lead:failed err=${err instanceof Error ? err.message : String(err)}`)
         })
       }
+      return
     }
-    // Idle-without-report nudge (parity with V1): a member that went idle
-    // without ever messaging the lead gets ONE reminder to report via
-    // team_message. Without this, weak models finish silently and the lead
-    // waits forever — the exact failure seen live on 2026-09-14.
-    if (transition && transition.to === "ready" && transition.from === "busy") {
-      const entry = registry.getByName(transition.teamId, transition.memberName)
-      if (entry) nudgeMember(transition.teamId, transition.memberName, entry.sessionId)
+    const transition = dispatchV2Event(db, registry, tracker, event)
+    if (!interrupted && transition?.to === "ready" && transition.from === "busy") {
+      nudgeMember(transition.teamId, transition.memberName, sessionID)
     }
     if (transition && rpc) {
       await emitMemberEvent(rpc, transition).catch(() => {
@@ -333,6 +306,11 @@ export async function setupEnsemble(
     if (!event.sessionID) return
     const teamInfo = findTeamBySession(db, registry, event.sessionID)
     if (!teamInfo) return
+    if (teamInfo.role === "lead" && teamOwnership(db, teamInfo.teamId) === "orphaned") {
+      claimTeam(db, teamInfo.teamId)
+      rehydrateRegistry(db, registry, process.pid)
+    }
+    if (teamOwnership(db, teamInfo.teamId) !== "mine") return
     const prompt =
       teamInfo.role === "lead"
         ? buildLeadSystemPrompt(db, teamInfo.teamId, config)
@@ -358,7 +336,7 @@ export async function setupEnsemble(
     }
     if (!event.sessionID) return
     const teamInfo = findTeamBySession(db, registry, event.sessionID)
-    if (!teamInfo) return
+    if (!teamInfo || teamOwnership(db, teamInfo.teamId) !== "mine") return
     const context = buildTeamCompactionContext(db, teamInfo.teamId, teamInfo.role, teamInfo.memberName)
     event.system.push({ type: "text", text: context })
   })
@@ -371,6 +349,7 @@ export async function setupEnsemble(
   const client = createV2Client(ctx, rpc ? { rpcEmitter: rpc } : {})
   wakeClient = client
   const deps: ToolDeps = {
+    v2: true,
     db,
     registry,
     tracker,

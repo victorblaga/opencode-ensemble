@@ -8,6 +8,8 @@ import type { ProgressTracker } from "./progress"
  * This avoids global state and makes tools testable with mocks.
  */
 export interface ToolDeps {
+  /** V2 teams are hosted by the current server process. */
+  v2?: boolean
   db: Database
   registry: MemberRegistry
   tracker: DescendantTracker
