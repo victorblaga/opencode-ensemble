@@ -22,6 +22,7 @@ import { hostedActivityBuffer, recordFromToolBefore, recordFromToolAfter } from 
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
 import { ensureDashboard, releaseDashboardClient } from "./dashboard"
 import { EnsembleRpc, emitMemberEvent, emitNoticeEvent } from "./v2-rpc"
+import { registerPermissionPolicy } from "./permissions"
 import { waiterRequired } from "./waiter"
 import { log } from "./log"
 
@@ -367,6 +368,7 @@ export async function setupEnsemble(
     config,
     progressTracker,
   }
+  await registerPermissionPolicy(ctx, db, registry)
   await registerV2Tools(ctx.tool, deps)
 
   ensureDashboard(db, config, { activityBuffer, client })

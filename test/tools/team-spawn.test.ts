@@ -380,16 +380,26 @@ describe("team_spawn", () => {
     expect(text).toContain("<summary>")
   })
 
-  test("read-only agent gets shorter tool list without write tools", async () => {
+  test("V2 reviewer can claim and complete a task with edit, shell, questions and T3 tools denied", async () => {
+    deps.v2 = true
+    deps.db.run("INSERT INTO team_task (id, team_id, content, status, time_created, time_updated) VALUES ('review', 't1', 'review', 'pending', 1, 1)")
     await executeTeamSpawn(deps, {
-      name: "alice", agent: "explore", prompt: "Research",
+      name: "alice", agent: "explore", prompt: "Research", claim_task: "review",
     }, "lead-sess")
     const promptCall = deps.client.calls.find(c => c.method === "session.promptAsync")
     const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
     expect(text).toContain("team_message")
     expect(text).not.toContain("team_tasks_add")
-    expect(text).not.toContain("team_tasks_complete")
-    expect(text).not.toContain("team_claim")
+    expect(text).toContain("mark it complete using team_tasks_complete")
+    expect(text).toContain("- team_claim")
+    expect(text).toContain("User questions and permission approvals are unavailable")
+    expect(deps.db.query("SELECT assignee, status FROM team_task WHERE id = 'review'").get()).toEqual({ assignee: "alice", status: "in_progress" })
+    const create = deps.client.calls.find(c => c.method === "session.create")?.args[0] as {
+      permission: Array<{ permission: string; action: string }>
+    }
+    expect(create.permission.filter(rule => rule.action === "deny").map(rule => rule.permission)).toEqual([
+      "edit", "bash", "question", "t3-code-*",
+    ])
   })
 
   // --- Worktree tests ---

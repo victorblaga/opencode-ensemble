@@ -197,6 +197,12 @@ export async function executeTeamSpawn(
   // read-only agents (deny-all policies like explore's) cannot reach any
   // team tool. Safe: nested calls inside execute still enforce their own
   // permissions, so explore stays read-only.
+  if (deps.v2) {
+    permission.push(
+      { permission: "question", pattern: "*", action: "deny" },
+      { permission: "t3-code-*", pattern: "*", action: "deny" },
+    )
+  }
   permission.push({ permission: "execute", pattern: "*", action: "allow" })
 
   // V2 returns an isolated child only after verifying its checkout and location.
@@ -309,10 +315,10 @@ export async function executeTeamSpawn(
 
   // Auto-claim a task for this teammate when claim_task is provided (issue #27).
   // Claims atomically so a task is never double-assigned when the lead hands out
-  // more tasks than there are teammates. Read-only agents cannot claim tasks.
+  // more tasks than there are teammates.
   let claimedTaskContent: string | null = null
   let claimWarning: string | null = null
-  if (args.claim_task && !isReadOnly) {
+  if (args.claim_task) {
     try {
       claimedTaskContent = claimTask(deps.db, teamInfo.teamId, args.claim_task, args.name)
       log(`spawn:claim:ok name=${args.name} task=${args.claim_task}`)
@@ -327,6 +333,8 @@ export async function executeTeamSpawn(
     `You are "${args.name}", a teammate in team "${teamInfo.teamName}".`,
     `Your agent type is "${agent}".`,
   ]
+
+  if (deps.v2) context.push("User questions and permission approvals are unavailable to teammates. Send blockers to the lead with team_message.")
 
   // Show other teammates so this agent knows who to message
   const otherMembers = deps.db.query(
@@ -365,24 +373,15 @@ export async function executeTeamSpawn(
     )
   }
 
-  if (isReadOnly) {
-    context.push(
-      "", "Tools available to you:",
-      "- team_message: send a message to the lead or another teammate",
-      "- team_broadcast: send a message to all team members",
-      "- team_tasks_list: view the shared team task board",
-    )
-  } else {
-    context.push(
-      "", "Tools available to you:",
-      "- team_message: send a message to the lead or another teammate",
-      "- team_broadcast: send a message to all team members",
-      "- team_tasks_list: view the shared team task board",
-      "- team_tasks_add: add tasks to the shared board",
-      "- team_tasks_complete: mark a task complete on the shared board",
-      "- team_claim: claim a pending task from the shared board",
-    )
-  }
+  context.push(
+    "", "Tools available to you:",
+    "- team_message: send a message to the lead or another teammate",
+    "- team_broadcast: send a message to all team members",
+    "- team_tasks_list: view the shared team task board",
+    "- team_tasks_complete: mark a task complete on the shared board",
+    "- team_claim: claim a pending task from the shared board",
+  )
+  if (!isReadOnly) context.push("- team_tasks_add: add tasks to the shared board")
 
   // Collaboration guidance for peer-to-peer communication
   if (otherMembers.length > 0) {
@@ -398,22 +397,15 @@ export async function executeTeamSpawn(
   }
 
   context.push("", "When you finish your task:")
+  let step = 1
   if (!isReadOnly && worktreeBranch) {
     context.push(`1. Commit your changes: git add -A && git commit -m "your summary"`)
-    context.push("2. If you claimed a task, mark it complete using team_tasks_complete.")
-    context.push(
-      "3. Send ONE message to the lead using team_message with this format:",
-    )
-  } else if (!isReadOnly) {
-    context.push("1. If you claimed a task, mark it complete using team_tasks_complete.")
-    context.push(
-      "2. Send ONE message to the lead using team_message with this format:",
-    )
-  } else {
-    context.push(
-      "1. Send ONE message to the lead using team_message with this format:",
-    )
+    step++
   }
+  context.push(
+    `${step++}. If you claimed a task, mark it complete using team_tasks_complete.`,
+    `${step++}. Send ONE message to the lead using team_message with this format:`,
+  )
   context.push(
     "<task-result>",
     "<status>completed or failed</status>",
@@ -424,9 +416,8 @@ export async function executeTeamSpawn(
     context.push(`<branch>${worktreeBranch}</branch>`)
   }
   context.push("</task-result>")
-  const lastStep = !isReadOnly && worktreeBranch ? "4" : !isReadOnly ? "3" : "2"
   context.push(
-    `${lastStep}. STOP. Do not send follow-up confirmations, status updates, or 'standing by' messages.`,
+    `${step}. STOP. Do not send follow-up confirmations, status updates, or 'standing by' messages.`,
     "",
     "If you are blocked:",
     "- Send ONE message to the lead via team_message describing the specific blocker.",

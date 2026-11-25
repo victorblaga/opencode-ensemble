@@ -34,6 +34,7 @@ export interface V2Context {
     refresh(input?: Record<string, unknown>): Promise<unknown>
   }
   permission: {
+    hook?(name: string, cb: (event: never) => unknown): Promise<{ dispose(): Promise<void> }>
     /** Present on 2.0.3–2.0.18 only; removed in 2.0.19 (see issue #40). */
     rules?(input: Record<string, unknown>): Promise<unknown>
   }
