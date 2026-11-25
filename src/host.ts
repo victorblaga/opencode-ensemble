@@ -62,13 +62,14 @@ export function claimTeam(db: Database, teamId: string): { claimed: boolean; int
   return result
 }
 
-export function requireHostedHere(db: Database, teamId: string, role: "lead" | "member"): void {
+export function requireHostedHere(db: Database, teamId: string, role: "lead" | "member"): boolean {
+  let claimed = false
   let ownership = teamOwnership(db, teamId)
   if (ownership === "orphaned" && role === "lead") {
-    claimTeam(db, teamId)
+    claimed = claimTeam(db, teamId).claimed
     ownership = teamOwnership(db, teamId)
   }
-  if (ownership === "mine") return
+  if (ownership === "mine") return claimed
   if (ownership === "orphaned") throw new Error("This team's server stopped; the lead has to return first.")
   const host = teamHost(db, teamId)
   log(`host:refused team=${teamId} owner=${host?.host_pid}`)

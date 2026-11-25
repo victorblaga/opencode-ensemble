@@ -10,6 +10,8 @@ import type { ProgressTracker } from "./progress"
 export interface ToolDeps {
   /** V2 teams are hosted by the current server process. */
   v2?: boolean
+  /** Refresh process resources after this location creates or adopts a team. */
+  onTeamHosted?: () => void
   db: Database
   registry: MemberRegistry
   tracker: DescendantTracker

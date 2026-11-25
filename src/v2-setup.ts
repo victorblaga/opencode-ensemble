@@ -18,11 +18,10 @@ import { rehydrateRegistry } from "./recovery"
 import { findTeamBySession } from "./types"
 import { loadConfig } from "./config"
 import { TokenBucket } from "./rate-limit"
-import { ActivityBuffer, recordFromToolBefore, recordFromToolAfter } from "./activity"
+import { hostedActivityBuffer, recordFromToolBefore, recordFromToolAfter } from "./activity"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
-import { startDashboard, type DashboardServer } from "./dashboard"
+import { ensureDashboard, releaseDashboardClient } from "./dashboard"
 import { EnsembleRpc, emitMemberEvent, emitNoticeEvent } from "./v2-rpc"
-import { isWorktreeInstance } from "./util"
 import { waiterRequired } from "./waiter"
 import { log } from "./log"
 
@@ -100,10 +99,11 @@ export async function setupEnsemble(
   const db = createDb(options.dbPath ?? getDbPath())
   log(`init:instance directory=${ctx.location.directory}`)
   const config = loadConfig(ctx.location.directory)
+  config.dashboardPort = options.dashboardPort ?? config.dashboardPort
   const registry: MemberRegistry = new MemberRegistryImpl()
   const tracker: DescendantTracker = new DescendantTrackerImpl()
   const purgeApprovals = new PendingPurgeApprovals()
-  const activityBuffer = new ActivityBuffer()
+  const activityBuffer = hostedActivityBuffer
   const progressTracker = new ProgressTracker()
   const nudgedMembers = new Set<string>()
 
@@ -312,7 +312,9 @@ export async function setupEnsemble(
     const teamInfo = findTeamBySession(db, registry, event.sessionID)
     if (!teamInfo) return
     if (teamInfo.role === "lead" && teamOwnership(db, teamInfo.teamId) === "orphaned") {
-      claimTeam(db, teamInfo.teamId)
+      if (claimTeam(db, teamInfo.teamId).claimed && wakeClient) {
+        ensureDashboard(db, config, { activityBuffer, client: wakeClient })
+      }
       rehydrateRegistry(db, registry, process.pid)
     }
     if (teamOwnership(db, teamInfo.teamId) !== "mine") return
@@ -355,6 +357,7 @@ export async function setupEnsemble(
   wakeClient = client
   const deps: ToolDeps = {
     v2: true,
+    onTeamHosted: () => ensureDashboard(db, config, { activityBuffer, client }),
     db,
     registry,
     tracker,
@@ -366,15 +369,7 @@ export async function setupEnsemble(
   }
   await registerV2Tools(ctx.tool, deps)
 
-  // Dashboard mirrors V1: main instance only, skipped when port is 0.
-  let dashboard: DashboardServer | null = null
-  const dashboardPort = options.dashboardPort ?? config.dashboardPort
-  if (dashboardPort !== 0 && !isWorktreeInstance(ctx.location.directory)) {
-    dashboard = await startDashboard(db, dashboardPort, { activityBuffer, client, host: config.dashboardHost }).catch((err) => {
-      log(`init:dashboard:failed err=${err instanceof Error ? err.message : String(err)}`)
-      return null
-    })
-  }
+  ensureDashboard(db, config, { activityBuffer, client })
 
   return {
     db,
@@ -383,7 +378,7 @@ export async function setupEnsemble(
     dispatch,
     dispose: async () => {
       controller.abort()
-      dashboard?.stop()
+      releaseDashboardClient(client)
     },
   }
 }

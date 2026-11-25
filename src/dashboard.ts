@@ -1,5 +1,7 @@
 import { createServer } from "node:http"
 import type { IncomingMessage, Server, ServerResponse } from "node:http"
+import type { EnsembleConfig } from "./config"
+import { pidAlive } from "./host"
 import type { Database } from "./db"
 import { DASHBOARD_HEAD } from "./dashboard-html"
 import { DASHBOARD_JS_CORE } from "./dashboard-js-core"
@@ -22,6 +24,7 @@ interface TeamRow {
   lead_session_id: string
   status: string
   lead_agent: string | null
+  host_pid: number | null
   time_created: number
   time_updated: number
 }
@@ -96,9 +99,9 @@ export interface EnsembleDashboardState {
   teams: unknown[]
 }
 
-function buildState(db: Database): EnsembleDashboardState {
+function buildState(db: Database, hosted: boolean): EnsembleDashboardState {
   const projects = db.query("SELECT id, name, path, status, time_created, time_updated FROM project ORDER BY time_updated DESC").all() as ProjectRow[]
-  const teams = db.query("SELECT id, name, project_id, lead_session_id, status, lead_agent, time_created, time_updated FROM team ORDER BY time_created DESC").all() as TeamRow[]
+  const teams = db.query("SELECT id, name, project_id, lead_session_id, status, lead_agent, host_pid, time_created, time_updated FROM team ORDER BY time_created DESC").all() as TeamRow[]
   const memberStmt = db.query("SELECT name, agent, status, execution_status, session_id, worktree_branch, prompt, model, plan_approval, time_created, time_updated, last_nudged_at, retry_until, retry_attempt, retry_provider, retry_message FROM team_member WHERE team_id = ?")
   const taskStmt = db.query("SELECT id, content, status, priority, assignee, depends_on, time_created, time_updated FROM team_task WHERE team_id = ?")
   const msgStmt = db.query("SELECT id, from_name, to_name, content, delivered, read, time_created FROM team_message WHERE team_id = ? ORDER BY time_created DESC LIMIT 50")
@@ -133,6 +136,8 @@ function buildState(db: Database): EnsembleDashboardState {
       leadSessionId: t.lead_session_id,
       status: t.status,
       leadAgent: t.lead_agent,
+      hostPid: t.host_pid,
+      hostAlive: t.host_pid === null ? !hosted : pidAlive(t.host_pid),
       timeCreated: t.time_created,
       timeUpdated: t.time_updated,
       members,
@@ -178,8 +183,9 @@ function buildState(db: Database): EnsembleDashboardState {
         timeUpdated: project.time_updated,
         activeTeams: projectTeams.filter(team => (team as { status: string }).status === "active").length,
         workingAgents: projectTeams.reduce<number>((count, team) => {
-          const members = (team as { members: Array<{ status: string }> }).members
-          return count + members.filter(member => member.status === "busy").length
+          const { hostAlive, members } = team as { hostAlive: boolean; members: Array<{ status: string }> }
+          if (!hostAlive) return count
+          return count + members.filter(member => member.status === "busy" || member.status === "shutdown_requested").length
         }, 0),
         teams: projectTeams,
       }
@@ -195,6 +201,10 @@ export interface DashboardServer {
 
 /** Optional dependencies for the dashboard server. */
 export interface DashboardOptions {
+  /** V2 marks teams without an owner as stopped. */
+  hosted?: boolean
+  /** Dashboard retake interval (defaults to 15 seconds). */
+  retryMs?: number
   /** Network interface to bind (defaults to loopback). */
   host?: string
   /** In-memory activity buffer for real-time per-session events. */
@@ -332,7 +342,7 @@ function handleDashboardRequest(
   }
 
   if (url.pathname === "/api/state") {
-    sendJson(res, buildState(db))
+    sendJson(res, buildState(db, options?.hosted ?? false))
     return
   }
 
@@ -384,38 +394,51 @@ export async function startDashboard(db: Database, port: number, options?: Dashb
   return new Promise((resolve) => {
     const server = createServer((req, res) => handleDashboardRequest(db, port, req, res, options))
 
-    server.once("error", async (err: NodeJS.ErrnoException) => {
-      if (err.code === "EADDRINUSE") {
-        try {
-          const res = await fetch(`http://localhost:${port}/api/health`)
-          const data = await res.json() as { ensemble?: boolean; pid?: number }
-          if (data.ensemble && data.pid) {
-            // Check if the other process is still alive
-            let alive = false
-            try { process.kill(data.pid, 0); alive = true } catch { /* process is dead */ }
-            if (alive && data.pid !== process.pid) {
-              log(`dashboard:already-running port=${port} pid=${data.pid}`)
-              resolve(null)
-              return
-            }
-            // Stale server from a dead process — warn the user
-            log(`dashboard:stale-server port=${port} stale-pid=${data.pid} — run: kill -9 ${data.pid} || lsof -ti:${port} | xargs kill -9`)
-            resolve(null)
-            return
-          }
-        } catch { /* health check failed — port held by something else */ }
-        log(`dashboard:port-in-use port=${port} (not an ensemble instance)`)
-        resolve(null)
-        return
-      }
-
-      log(`dashboard:failed err=${err.message}`)
+    server.once("error", (err: NodeJS.ErrnoException) => {
+      log(`dashboard:bind-failed port=${port} err=${err.message}`)
       resolve(null)
     })
 
     server.listen(port, options?.host ?? "127.0.0.1", () => {
+      if (options?.hosted) server.unref()
       log(`dashboard:started port=${port} url=http://localhost:${port}`)
       resolve(toDashboardServer(server))
     })
   })
+}
+
+const dashboardClients = new Set<PluginClient>()
+const hostedOptions: DashboardOptions = { hosted: true }
+let bindingOrListening = false
+
+export function releaseDashboardClient(client: PluginClient): void {
+  dashboardClients.delete(client)
+  if (hostedOptions.client === client) hostedOptions.client = [...dashboardClients].at(-1)
+}
+
+/** Bind once for this process, and retry while it still hosts a team. */
+export function ensureDashboard(db: Database, config: Required<EnsembleConfig>, deps: DashboardOptions): void {
+  if (!config.dashboardPort) return
+  if (deps.client) {
+    dashboardClients.delete(deps.client)
+    dashboardClients.add(deps.client)
+    hostedOptions.client = deps.client
+  }
+  if (bindingOrListening) return
+
+  const tryBind = async (retry: boolean): Promise<void> => {
+    if (!db.query("SELECT 1 FROM team WHERE status = 'active' AND host_pid = ? LIMIT 1").get(process.pid)) {
+      bindingOrListening = false
+      return
+    }
+    bindingOrListening = true
+    hostedOptions.host = config.dashboardHost
+    hostedOptions.activityBuffer = deps.activityBuffer
+    if (await startDashboard(db, config.dashboardPort, hostedOptions)) {
+      if (retry) log(`dashboard:retaken port=${config.dashboardPort}`)
+      return
+    }
+    setTimeout(() => { void tryBind(true) }, deps.retryMs ?? 15_000).unref()
+  }
+  void tryBind(false)
 }

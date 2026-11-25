@@ -66,12 +66,17 @@ function rAttention(t){
   patch(el,html);
 }
 
+function memberCardStatus(t,m){
+  return hostDown(t)&&m.status!=='shutdown'&&m.status!=='error'
+    ? {...si('shutdown'),l:'stopped (host down)'} : si(m.status);
+}
+
 function rAgents(t){
   const el=document.getElementById('agents'),mm=t.members||[];
   if(!mm.length){patch(el,'<div class="col-span-full text-center py-12"><div class="text-txt-400 text-sm mb-1">No agents yet</div><div class="text-txt-500 text-[11px]">Spawn teammates with <code class="px-1 py-0.5 bg-base-900 rounded font-mono text-[10px]">team_spawn</code></div></div>');return}
   const n=Date.now(),msgs=t.messages||[],sorted=[...mm].sort((a,b)=>rankAgent(a,b,t));
   const html=sorted.map((m,idx)=>{
-    const s=si(m.status),task=activeTaskFor(m.name,t.tasks||[]),msg=lastMessageFor(m.name,msgs),blocked=blockedTaskFor(m.name,t.tasks||[]);
+    const s=memberCardStatus(t,m),task=activeTaskFor(m.name,t.tasks||[]),msg=lastMessageFor(m.name,msgs),blocked=blockedTaskFor(m.name,t.tasks||[]);
     const d=D(n-m.timeUpdated),mi=msg?relT(msg.timeCreated):'\\u2014';
     const tt=task?.content,tr=tt&&tt.length>90?tt.slice(0,90)+'\\u2026':tt;
     const mp=msg?(msg.content.length>90?msg.content.slice(0,90)+'\\u2026':msg.content):'';
@@ -79,7 +84,7 @@ function rAgents(t){
     const isSel=selCard===idx;
     return '<button type="button" class="text-left rounded-lg border '+s.c+' p-3 transition-all duration-300 cursor-pointer hover:border-base-600 focus-visible:border-blue-400'+(isSel?' card-sel':'')+'" data-card="'+E(m.name)+'" onclick="openDrawer(this.dataset.card)" onkeydown="if(event.key===\\'Enter\\'||event.key===\\' \\'){event.preventDefault();openDrawer(this.dataset.card)}">'+
       '<div class="flex items-center gap-2">'+
-        '<span class="w-[8px] h-[8px] rounded-full '+s.d+(m.status==='busy'?' pulse':'')+' shrink-0"></span>'+
+        '<span class="w-[8px] h-[8px] rounded-full '+s.d+(!hostDown(t)&&workingMember(m)?' pulse':'')+' shrink-0"></span>'+
         '<span class="font-mono font-semibold text-[14px] truncate">'+E(m.name)+'</span>'+
         '<span class="text-[10px] px-1.5 py-[1px] rounded '+s.t+' bg-base-800/80 shrink-0">'+s.l+(m.lastNudgedAt?', nudged '+relT(m.lastNudgedAt):'')+'</span>'+
         spark+
@@ -89,8 +94,8 @@ function rAgents(t){
       (tr?'<div class="mt-2 text-[13px] text-txt-200 leading-snug truncate">'+(blocked?'<span class="text-amber-400">Blocked: </span>':'Current task: ')+E(tr)+'</div>':'<div class="mt-2 text-[13px] text-txt-500 leading-snug">No active task</div>')+
       (mp?'<div class="mt-1 text-[12px] text-txt-400 truncate">Latest: '+E(mp)+'</div>':'')+
       '<div class="mt-2 flex items-center gap-1.5 flex-wrap">'+
-        chip('status '+d,'muted')+chip('msg '+mi,'muted')+chip(E(m.executionStatus||m.status),m.status==='busy'?'blue':m.status==='error'?'red':'muted')+
-        (m.isRetrying?chip('retrying'+(m.retryAttempt!=null?' (attempt '+m.retryAttempt+')':''),'amber'):'')+
+        chip('status '+d,'muted')+chip('msg '+mi,'muted')+chip(E(hostDown(t)?s.l:(m.executionStatus||m.status)),!hostDown(t)&&workingMember(m)?'blue':m.status==='error'?'red':'muted')+
+        (!hostDown(t)&&m.isRetrying?chip('retrying'+(m.retryAttempt!=null?' (attempt '+m.retryAttempt+')':''),'amber'):'')+
         (m.worktreeBranch?chip(E(m.worktreeBranch),'muted'):'')+
       '</div></button>';
   }).join('');
@@ -100,18 +105,18 @@ function rAgents(t){
 function openDrawer(name){
   var t=cur();if(!t)return;
   var m=(t.members||[]).find(x=>x.name===name);if(!m)return;
-  var s=si(m.status),msgs=(t.messages||[]).filter(x=>x.fromName===name);
+  var s=memberCardStatus(t,m),msgs=(t.messages||[]).filter(x=>x.fromName===name);
   var h='';
   // Header
   h+='<div class="flex items-center justify-between mb-4">';
-  h+='<div class="flex items-center gap-2"><span class="w-[10px] h-[10px] rounded-full '+s.d+(m.status==='busy'?' pulse':'')+'"></span><h2 id="drawer-title" class="font-mono font-semibold text-[16px]">'+E(m.name)+'</h2><span class="text-[11px] px-2 py-[2px] rounded '+s.t+' bg-base-800/80">'+s.l+'</span></div>';
+  h+='<div class="flex items-center gap-2"><span class="w-[10px] h-[10px] rounded-full '+s.d+(!hostDown(t)&&workingMember(m)?' pulse':'')+'"></span><h2 id="drawer-title" class="font-mono font-semibold text-[16px]">'+E(m.name)+'</h2><span class="text-[11px] px-2 py-[2px] rounded '+s.t+' bg-base-800/80">'+s.l+'</span></div>';
   h+='<button id="drawer-close" aria-label="Close agent detail" onclick="closeDrawer()" class="text-txt-500 hover:text-txt-200 transition-colors p-1"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>';
   h+='</div>';
   // Meta chips
   var meta=[];
   meta.push(chip(E(m.agent),'gray'));
   if(m.model)meta.push(chip(E(m.model),'gray'));
-  meta.push(chip(E(m.executionStatus||m.status),m.status==='busy'?'blue':m.status==='error'?'red':'muted'));
+  meta.push(chip(E(hostDown(t)?s.l:(m.executionStatus||m.status)),!hostDown(t)&&workingMember(m)?'blue':m.status==='error'?'red':'muted'));
   if(m.planApproval&&m.planApproval!=='none')meta.push(chip(E(m.planApproval),m.planApproval==='approved'?'green':m.planApproval==='rejected'?'red':'amber'));
   meta.push(chip('spawned '+relT(m.timeCreated),'muted'));
   if(m.lastNudgedAt)meta.push(chip('nudged '+relT(m.lastNudgedAt),'amber'));

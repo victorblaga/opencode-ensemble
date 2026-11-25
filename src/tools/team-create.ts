@@ -63,5 +63,6 @@ export async function executeTeamCreate(
     [id, args.name, projectId, sessionId, now, now, deps.v2 ? process.pid : null, deps.v2 ? "busy" : "idle"]
   )
 
+  deps.onTeamHosted?.()
   return `Team "${args.name}" created. You are the lead. Use team_spawn to add teammates.`
 }

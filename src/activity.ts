@@ -213,3 +213,6 @@ export function recordFromToolAfter(
     timestamp: Date.now(),
   })
 }
+
+/** Activity shared by the V2 plugin locations in this process. */
+export const hostedActivityBuffer = new ActivityBuffer()

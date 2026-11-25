@@ -223,19 +223,6 @@ describe("v2-setup (issue #36)", () => {
     await handle.dispose()
   })
 
-  test("dashboard serves team state on the configured port", async () => {    const { ctx } = mockSetupCtx()
-    const handle = await setupEnsemble(ctx, { dbPath: ":memory:", dashboardPort: 47999 })
-    seedLeadAndMember(handle)
-    const res = await fetch("http://localhost:47999/api/health")
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as { ensemble?: boolean }
-    expect(body.ensemble).toBe(true)
-    const teams = (await (await fetch("http://localhost:47999/api/state")).json()) as {
-      teams?: unknown[]
-    }
-    expect(teams.teams?.length).toBe(1)
-    await handle.dispose()
-  })
 
   test("extractQuestionOutput reads string and part-array results", () => {
     expect(extractQuestionOutput({ content: "Approve purge abc123" })).toBe("Approve purge abc123")

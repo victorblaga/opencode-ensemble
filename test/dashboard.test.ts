@@ -703,3 +703,51 @@ describe("dashboard", () => {
     })
   })
 })
+
+test("hosted dashboard waits for a team, retakes the port, and refreshes its client", async () => {
+  const { createServer } = await import("node:http")
+  const { ensureDashboard, releaseDashboardClient } = await import("../src/dashboard")
+  const { DEFAULT_CONFIG } = await import("../src/config")
+  const db = setupDb()
+  const holder = createServer()
+  await new Promise<void>(resolve => holder.listen(0, "127.0.0.1", resolve))
+  const address = holder.address()
+  if (!address || typeof address === "string") throw new Error("No dashboard port")
+  const url = `http://127.0.0.1:${address.port}`
+  const config = { ...DEFAULT_CONFIG, dashboardPort: address.port }
+  const first = mockClient()
+  const second = mockClient()
+  first.session.get = async () => ({ data: { id: "first" } })
+  second.session.get = async () => ({ data: { id: "second" } })
+  await new Promise<void>(resolve => holder.close(() => resolve()))
+  ensureDashboard(db, config, { client: first, retryMs: 30 })
+  await expect(fetch(`${url}/api/state`)).rejects.toThrow()
+
+  await new Promise<void>(resolve => holder.listen(address.port, "127.0.0.1", resolve))
+  insertTeam(db, "hosted", "test", "lead")
+  insertTeam(db, "dead", "stopped", "dead")
+  db.run("UPDATE team SET host_pid = 2147483647 WHERE id = 'dead'")
+  insertMember(db, "dead", "worker", "worker-session", "busy", "running")
+  ensureDashboard(db, config, { client: first, retryMs: 30 })
+  await Bun.sleep(40)
+  await new Promise<void>(resolve => holder.close(() => resolve()))
+
+  let response: Response | undefined
+  for (let i = 0; i < 20 && !response; i++) {
+    response = await fetch(`${url}/api/state`).catch(() => undefined)
+    if (!response) await Bun.sleep(10)
+  }
+  expect(response?.status).toBe(200)
+  const state = await response?.json() as StateResponse
+  expect(state.version).toBe(1)
+  expect(state.teams.find(team => team.id === "dead")).toMatchObject({ hostAlive: false, hostPid: 2147483647 })
+  expect(state.projects[0]?.workingAgents).toBe(0)
+
+  const activity = async () => (await (await fetch(`${url}/api/session/worker-session/activity`)).json()) as { session: { id: string } }
+  expect((await activity()).session.id).toBe("first")
+  ensureDashboard(db, config, { client: second, retryMs: 30 })
+  expect((await activity()).session.id).toBe("second")
+  releaseDashboardClient(second)
+  expect((await activity()).session.id).toBe("first")
+  releaseDashboardClient(first)
+})
