@@ -411,9 +411,22 @@ export async function startDashboard(db: Database, port: number, options?: Dashb
   })
 }
 
-const dashboardClients = new Set<PluginClient>()
-const hostedOptions: DashboardOptions = { hosted: true }
-let bindingOrListening = false
+/**
+ * One dashboard per process. OpenCode loads a separate copy of this module for every
+ * location, so the state lives on globalThis; module-level state would let each copy
+ * keep retrying against the listener another copy already owns.
+ */
+interface ProcessDashboard {
+  clients: Set<PluginClient>
+  options: DashboardOptions
+  bindingOrListening: boolean
+}
+const processKey = Symbol.for("opencode-ensemble.dashboard")
+const processGlobal = globalThis as Record<symbol, ProcessDashboard | undefined>
+processGlobal[processKey] ??= { clients: new Set<PluginClient>(), options: { hosted: true }, bindingOrListening: false }
+const processDashboard = processGlobal[processKey]
+const dashboardClients = processDashboard.clients
+const hostedOptions = processDashboard.options
 
 export function releaseDashboardClient(client: PluginClient): void {
   dashboardClients.delete(client)
@@ -428,15 +441,15 @@ export function ensureDashboard(db: Database, config: Required<EnsembleConfig>, 
     dashboardClients.add(deps.client)
     hostedOptions.client = deps.client
   }
-  if (bindingOrListening) return
+  if (processDashboard.bindingOrListening) return
 
   const tryBind = async (retry: boolean): Promise<void> => {
     try {
       if (!db.query("SELECT 1 FROM team WHERE status = 'active' AND host_pid = ? LIMIT 1").get(process.pid)) {
-        bindingOrListening = false
+        processDashboard.bindingOrListening = false
         return
       }
-      bindingOrListening = true
+      processDashboard.bindingOrListening = true
       hostedOptions.host = config.dashboardHost
       hostedOptions.activityBuffer = deps.activityBuffer
       if (await startDashboard(db, config.dashboardPort, hostedOptions)) {
@@ -445,7 +458,7 @@ export function ensureDashboard(db: Database, config: Required<EnsembleConfig>, 
       }
       setTimeout(() => { void tryBind(true) }, deps.retryMs ?? 15_000).unref()
     } catch (error) {
-      bindingOrListening = false
+      processDashboard.bindingOrListening = false
       log(`dashboard:bind-failed port=${config.dashboardPort} err=${error instanceof Error ? error.message : String(error)}`)
     }
   }

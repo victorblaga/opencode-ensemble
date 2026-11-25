@@ -751,6 +751,17 @@ test("hosted dashboard waits for a team, retakes the port, and refreshes its cli
   expect((await activity()).session.id).toBe("first")
   ensureDashboard(db, config, { client: second, retryMs: 30 })
   expect((await activity()).session.id).toBe("second")
+
+  // OpenCode loads one module copy per location; a second copy must not fight the listener.
+  const { logPath } = await import("../src/log")
+  const { readFileSync } = await import("node:fs")
+  const portInUse = () => (readFileSync(logPath(), "utf8").match(new RegExp(`dashboard:port-in-use port=${address.port}\\b`, "g")) ?? []).length
+  const before = portInUse()
+  const secondLocation = "../src/dashboard.ts?location=second"
+  const copy = await import(secondLocation) as typeof import("../src/dashboard")
+  copy.ensureDashboard(db, config, { client: second, retryMs: 10 })
+  await Bun.sleep(60)
+  expect(portInUse()).toBe(before)
   releaseDashboardClient(second)
   expect((await activity()).session.id).toBe("first")
   releaseDashboardClient(first)

@@ -1,3 +1,10 @@
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+// Keep test log lines out of the real ~/.local/state/opencode-ensemble/ensemble.log.
+process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), "ensemble-test-state-"))
+
 import { Database } from "bun:sqlite"
 import type { Database as EnsembleDatabase } from "../src/db"
 import { applyMigrations } from "../src/schema"
