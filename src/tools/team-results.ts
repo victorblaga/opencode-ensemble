@@ -17,7 +17,7 @@ interface UnreadMessageRow {
  * The query is recipient-scoped: a teammate calling team_results must not
  * drain messages addressed to the lead (or to another teammate), or those
  * messages would disappear from the recipient's system prompt and wake path.
- * Broadcast rows (to_name IS NULL) are visible to every team member.
+ * V2 leads receive their own addressed copy of worker broadcasts.
  */
 export async function executeTeamResults(
   deps: ToolDeps,
@@ -27,18 +27,19 @@ export async function executeTeamResults(
   const team = requireTeamMember(deps, sessionId)
   const inbox = team.role === "lead" ? "lead" : (team.memberName ?? "")
 
+  const recipient = deps.v2 && team.role === "lead" ? "to_name = ?" : "(to_name = ? OR to_name IS NULL)"
   const rows = args.from
     ? (deps.db
         .query(
           `SELECT id, from_name, content, time_created FROM team_message
-           WHERE team_id = ? AND read = 0 AND (to_name = ? OR to_name IS NULL) AND from_name = ?
+           WHERE team_id = ? AND read = 0 AND ${recipient} AND from_name = ?
            ORDER BY time_created ASC`,
         )
         .all(team.teamId, inbox, args.from) as UnreadMessageRow[])
     : (deps.db
         .query(
           `SELECT id, from_name, content, time_created FROM team_message
-           WHERE team_id = ? AND read = 0 AND (to_name = ? OR to_name IS NULL)
+           WHERE team_id = ? AND read = 0 AND ${recipient}
            ORDER BY time_created ASC`,
         )
         .all(team.teamId, inbox) as UnreadMessageRow[])

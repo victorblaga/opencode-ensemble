@@ -37,6 +37,8 @@ export interface PermissionRule {
  * Makes mocking trivial in tests.
  */
 export interface PluginClient {
+  /** V2 waiter guidance is required in this plugin instance. Absent on V1. */
+  leadWaiter?: boolean
   /** V2 provisions and verifies an isolated child, or returns undefined if the lead has no Git commit. */
   createIsolatedSession?(options: {
     parentID: string

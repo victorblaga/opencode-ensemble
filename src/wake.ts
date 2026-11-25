@@ -1,6 +1,9 @@
 import type { Database } from "./db"
 import type { PluginClient } from "./types"
 import { getSessionSelection } from "./member-model"
+import type { EnsembleConfig } from "./config"
+import { teamOwnership } from "./host"
+import { waiterAlive, waiterCommand, waiterRequired, workingCount } from "./waiter"
 import { log } from "./log"
 
 /** Options for a lead wake. */
@@ -20,9 +23,12 @@ interface WakeState {
 }
 
 const states = new WeakMap<Database, WakeState>()
+const hostedState: WakeState = { inFlight: new Set(), timers: new Map() }
+const reminded = new Set<string>()
 const WAKE_COOLDOWN_MS = 5000
 
-function stateFor(db: Database): WakeState {
+function stateFor(db: Database, hosted: boolean): WakeState {
+  if (hosted) return hostedState
   let state = states.get(db)
   if (!state) {
     state = { inFlight: new Set(), timers: new Map() }
@@ -80,7 +86,7 @@ function scheduleCooldownRetry(
   options: WakeLeadOptions,
   delayMs: number,
 ): void {
-  const state = stateFor(db)
+  const state = stateFor(db, client.leadWaiter !== undefined)
   if (state.timers.has(teamId)) return
   const timer = setTimeout(() => {
     state.timers.delete(teamId)
@@ -111,7 +117,10 @@ export async function wakeLeadIfPending(
   teamId: string,
   options: WakeLeadOptions = {},
 ): Promise<boolean> {
-  const state = stateFor(db)
+  const hosted = client.leadWaiter !== undefined
+  if (hosted && (teamOwnership(db, teamId) !== "mine" || observeWaiter(teamId))) return false
+  const force = !hosted && options.force
+  const state = stateFor(db, hosted)
   if (state.inFlight.has(teamId)) return false
 
   const before = pendingLeadWake(db, teamId)
@@ -122,7 +131,7 @@ export async function wakeLeadIfPending(
 
   const cooldownMs = options.cooldownMs ?? WAKE_COOLDOWN_MS
   const now = Date.now()
-  if (!options.force && now - before.lastWakeAt < cooldownMs) {
+  if (!force && now - before.lastWakeAt < cooldownMs) {
     const remaining = cooldownMs - (now - before.lastWakeAt)
     scheduleCooldownRetry(client, db, teamId, options, remaining)
     log(`wake:skip team=${teamId} reason=cooldown retryIn=${remaining}ms`)
@@ -138,7 +147,7 @@ export async function wakeLeadIfPending(
     // messages first. lead_status is persisted so this decision is reliable
     // from teammate instances and between LLM steps. System/error
     // notifications can force the wake.
-    if (!options.force && leadIsBusy(before.leadStatus)) {
+    if (!force && leadIsBusy(before.leadStatus)) {
       log(`wake:skip team=${teamId} reason=lead-busy status=${before.leadStatus}`)
       return false
     }
@@ -146,7 +155,7 @@ export async function wakeLeadIfPending(
     // On V1 a wake is a normal user turn, so pass the lead's current agent and
     // model explicitly to stop OpenCode falling back to Build/default (#37).
     // V2 wakes are synthetic and ignore both, so skip the lookup there.
-    const selection = client.agent
+    const selection = hosted || client.agent
       ? {}
       : await getSessionSelection(client, before.leadSessionID).catch(() => ({}))
 
@@ -157,7 +166,7 @@ export async function wakeLeadIfPending(
       log(`wake:skip team=${teamId} reason=drained`)
       return false
     }
-    if (!options.force && leadIsBusy(after.leadStatus)) {
+    if (!force && leadIsBusy(after.leadStatus)) {
       log(`wake:skip team=${teamId} reason=lead-busy status=${after.leadStatus}`)
       return false
     }
@@ -168,11 +177,20 @@ export async function wakeLeadIfPending(
       state.timers.delete(teamId)
     }
     // Persisted, not in-memory: worktree teammate instances share this DB.
-    db.run("UPDATE team SET last_wake_at = ? WHERE id = ? AND status = 'active'", [Date.now(), teamId])
+    if (after.lastWakeAt !== before.lastWakeAt) return false
+    const stamp = Math.max(Date.now(), after.lastWakeAt + 1)
+    const claimed = db.run(
+      "UPDATE team SET last_wake_at = ? WHERE id = ? AND status = 'active' AND last_wake_at = ?",
+      [stamp, teamId, after.lastWakeAt],
+    ).changes
+    if (!claimed) return false
+    const waiterHint = client.leadWaiter && workingCount(db, teamId) > 0
+      ? ` When you finish this turn, start the waiter with shell background: true: \`${waiterCommand()}\`.`
+      : ""
     const senderText = after.senders.length > 0 ? ` from ${after.senders.join(", ")}` : ""
     client.session.promptAsync({
       sessionID: after.leadSessionID,
-      parts: [{ type: "text", text: `[System: ${after.count} new team message(s)${senderText}] — use team_results to read them` }],
+      parts: [{ type: "text", text: `[System: ${after.count} new team message(s)${senderText}] — use team_results to read them${waiterHint}` }],
       synthetic: true,
       ...(selection.agent ? { agent: selection.agent } : {}),
       ...(selection.model ? { model: selection.model } : {}),
@@ -184,6 +202,40 @@ export async function wakeLeadIfPending(
   } finally {
     state.inFlight.delete(teamId)
   }
+}
+
+/** A live waiter owns the next lead resume and re-arms its reminder. */
+function observeWaiter(teamId: string): boolean {
+  if (!waiterAlive(teamId)) return false
+  reminded.delete(teamId)
+  log(`wake:skip team=${teamId} reason=waiter-alive`)
+  return true
+}
+
+export async function onLeadIdle(
+  client: PluginClient,
+  db: Database,
+  teamId: string,
+  config: Required<EnsembleConfig>,
+): Promise<void> {
+  if (teamOwnership(db, teamId) !== "mine" || observeWaiter(teamId)) return
+  if (pendingLeadWake(db, teamId)) {
+    await wakeLeadIfPending(client, db, teamId)
+    return
+  }
+  if (!waiterRequired(config) || reminded.has(teamId)) return
+  const count = workingCount(db, teamId)
+  if (!count) return
+  const lead = db.query("SELECT lead_session_id FROM team WHERE id = ? AND lead_status = 'idle'")
+    .get(teamId) as { lead_session_id: string } | null
+  if (!lead) return
+  reminded.add(teamId)
+  log(`waiter:missing team=${teamId} working=${count}`)
+  client.session.promptAsync({
+    sessionID: lead.lead_session_id,
+    parts: [{ type: "text", text: `${count} teammate(s) still working and no waiter is running. Start it with shell background: true and end your turn: \`${waiterCommand()}\`` }],
+    synthetic: true,
+  }).catch(err => log(`waiter:reminder:failed team=${teamId} err=${err instanceof Error ? err.message : String(err)}`))
 }
 
 /** Clear wake coalescing state for a database (tests). */

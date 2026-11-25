@@ -282,3 +282,83 @@ describe("team_message wake coalescing (issue #57)", () => {
     expect(wakes(deps).length).toBeLessThanOrEqual(1)
   })
 })
+
+test("V2 waiter suppresses wake and re-arms one turn-end reminder", async () => {
+  const { mkdirSync, writeFileSync } = await import("node:fs")
+  const { onLeadIdle } = await import("../src/wake")
+  const deps = setupDeps()
+  const team = "wait-reminder"
+  const config = { ...deps.config, leadWaiter: "always" as const }
+  Object.assign(deps.client, { leadWaiter: true })
+  insertTeam(deps.db, team, "waiting", "lead")
+  insertMember(deps.db, team, "worker", "worker", "shutdown_requested")
+  deps.registry.register(team, "worker", "worker")
+  await onLeadIdle(deps.client, deps.db, team, { ...config, leadWaiter: "off" })
+  expect(wakes(deps)).toHaveLength(0)
+  await onLeadIdle(deps.client, deps.db, team, config)
+  await onLeadIdle(deps.client, deps.db, team, config)
+  expect(wakes(deps)).toHaveLength(1)
+  expect(wakes(deps)[0]?.parts[0]?.text).toContain("1 teammate")
+  const state = mkdtempSync(path.join(os.tmpdir(), "ensemble-wake-"))
+  const originalState = process.env.XDG_STATE_HOME
+  process.env.XDG_STATE_HOME = state
+  const dir = path.join(state, "opencode-ensemble", "waiters")
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(path.join(dir, team), String(process.pid))
+  try {
+    sendMessage(deps.db, { teamId: team, from: "worker", to: "lead", content: "progress" })
+    expect(await wakeLeadIfPending(deps.client, deps.db, team)).toBe(false)
+    await onLeadIdle(deps.client, deps.db, team, config)
+    expect(wakes(deps)).toHaveLength(1)
+  } finally {
+    if (originalState === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = originalState
+    rmSync(state, { recursive: true, force: true })
+  }
+  deps.db.run("UPDATE team_message SET delivered = 1")
+  await onLeadIdle(deps.client, deps.db, team, config)
+  expect(wakes(deps)).toHaveLength(2)
+})
+
+test("V2 worker broadcast routes the lead's copy exclusively through its inbox", async () => {
+  const { executeTeamBroadcast } = await import("../src/tools/team-broadcast")
+  const deps = { ...setupDeps(), v2: true }
+  Object.assign(deps.client, { leadWaiter: false })
+  insertTeam(deps.db, "broadcast", "test", "lead")
+  insertMember(deps.db, "broadcast", "sender", "sender")
+  insertMember(deps.db, "broadcast", "recipient", "recipient")
+  deps.registry.register("broadcast", "sender", "sender")
+  deps.registry.register("broadcast", "recipient", "recipient")
+  await executeTeamBroadcast(deps, { text: "broadcast payload" }, "sender")
+  expect(wakes(deps).filter(wake => wake.sessionID === "lead").map(wake => wake.synthetic)).toEqual([true])
+  expect(wakes(deps).filter(wake => wake.sessionID === "recipient")).toHaveLength(1)
+  expect((await executeTeamResults(deps, {}, "lead")).match(/broadcast payload/g)).toHaveLength(1)
+  expect(await executeTeamResults(deps, {}, "lead")).toBe("No unread messages.")
+  expect(deps.db.query("SELECT to_name FROM team_message ORDER BY to_name").all()).toEqual([{ to_name: null }, { to_name: "lead" }])
+})
+
+test("V2 uses one persistent wake claim across two database connections", async () => {
+  const { createDb } = await import("../src/db")
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ensemble-wake-claim-"))
+  const file = path.join(dir, "test.db")
+  const a = setupDeps(createDb(file))
+  const b = setupDeps(createDb(file))
+  try {
+    Object.assign(a.client, { leadWaiter: false })
+    Object.assign(b.client, { leadWaiter: false })
+    insertTeam(a.db, "claim", "claim", "lead")
+    for (const from of ["one", "two", "three", "four", "five"]) {
+      sendMessage(a.db, { teamId: "claim", from, to: "lead", content: "result" })
+    }
+    expect(await Promise.all([
+      wakeLeadIfPending(a.client, a.db, "claim"),
+      wakeLeadIfPending(b.client, b.db, "claim"),
+    ])).toEqual([true, false])
+    expect([...wakes(a), ...wakes(b)]).toHaveLength(1)
+    expect(wakes(a)[0]?.parts[0]?.text).toContain("5 new team message")
+  } finally {
+    a.db.close()
+    b.db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

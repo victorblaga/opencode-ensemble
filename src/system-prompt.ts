@@ -1,6 +1,7 @@
 import type { Database } from "./db"
 import { markDelivered } from "./messaging"
 import { parseTaskResult, formatTaskResult } from "./result-parser"
+import { waiterCommand, waiterRequired } from "./waiter"
 import type { EnsembleConfig } from "./config"
 
 /** Truncate a string to maxLen chars, appending "..." if truncated. */
@@ -21,7 +22,7 @@ const STATUS_DISPLAY: Record<string, string> = {
  * Build the system prompt injected into the lead's session.
  * Includes team name, member statuses, task counts, and anti-polling guidance.
  */
-export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Required<EnsembleConfig>): string {
+export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Required<EnsembleConfig>, v2 = false): string {
   const team = db.query("SELECT name FROM team WHERE id = ?").get(teamId) as { name: string } | null
   if (!team) return ""
 
@@ -115,6 +116,10 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
     // content the lead has already been told about. team_results still
     // returns these until they are read.
     for (const msg of pendingMessages) markDelivered(db, msg.id)
+  }
+
+  if (v2 && config && waiterRequired(config)) {
+    lines.push("", `After spawning teammates, and whenever teammates are still working at turn end, use the shell tool with background: true to run \`${waiterCommand()}\`. Then end your turn. The waiter resumes you when the team needs you. Do not poll.`)
   }
 
   // Model selection guidance (only when promptForModels is enabled)

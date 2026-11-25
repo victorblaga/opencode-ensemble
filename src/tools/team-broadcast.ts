@@ -1,7 +1,8 @@
 import type { ToolDeps } from "../types"
 import { requireTeamMember } from "./shared"
-import { broadcastMessage, markDelivered, hasReportedCompletion } from "../messaging"
+import { broadcastMessage, sendMessage, markDelivered, hasReportedCompletion } from "../messaging"
 import { getSessionSelection } from "../member-model"
+import { wakeLeadIfPending } from "../wake"
 import { log } from "../log"
 
 /**
@@ -28,7 +29,13 @@ export async function executeTeamBroadcast(
   // Add lead if sender is not lead. Resolve from the DB fresh: the team may
   // have been archived since requireTeamMember() ran.
   let leadSelection: Awaited<ReturnType<typeof getSessionSelection>> = {}
-  if (teamInfo.role !== "lead") {
+  const leadInbox = deps.v2 && teamInfo.role !== "lead"
+  if (leadInbox) {
+    sendMessage(deps.db, { teamId: teamInfo.teamId, from: senderName, to: "lead", content: args.text })
+    wakeLeadIfPending(deps.client, deps.db, teamInfo.teamId).catch((err) => {
+      log(`team_broadcast:wake:failed team=${teamInfo.teamId} err=${err instanceof Error ? err.message : String(err)}`)
+    })
+  } else if (teamInfo.role !== "lead") {
     const leadSession = deps.db.query("SELECT lead_session_id FROM team WHERE id = ? AND status = 'active'")
       .get(teamInfo.teamId) as { lead_session_id: string } | null
     if (leadSession?.lead_session_id) {
@@ -77,6 +84,6 @@ export async function executeTeamBroadcast(
     })
   }
 
-  const sent = recipients.length - skipped
+  const sent = recipients.length - skipped + (leadInbox ? 1 : 0)
   return `Broadcast sent to ${sent} recipient${sent !== 1 ? "s" : ""}.`
 }

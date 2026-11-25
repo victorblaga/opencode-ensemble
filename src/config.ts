@@ -6,6 +6,8 @@ import path from "node:path"
 export interface EnsembleConfig {
   /** Auto-merge worktree branches on cleanup (default: true) */
   mergeOnCleanup?: boolean
+  /** Require a lead waiter in T3 (auto), on all V2 hosts (always), or never (off). */
+  leadWaiter?: "auto" | "always" | "off"
   /** Stall detection threshold in ms (default: 180000 = 3 min, 0 to disable) */
   stallThresholdMs?: number
   /** Min steps before token-based stall check (default: 3) */
@@ -51,6 +53,7 @@ export interface EnsembleConfig {
 /** Default configuration values. */
 export const DEFAULT_CONFIG: Required<EnsembleConfig> = {
   mergeOnCleanup: true,
+  leadWaiter: "auto",
   stallThresholdMs: 300_000,
   stallMinSteps: 5,
   stallTokenThreshold: 200,
@@ -77,6 +80,7 @@ function readConfigFile(filePath: string): Partial<EnsembleConfig> {
     const raw = JSON.parse(text) as Record<string, unknown>
     // Validate types — only accept numbers for numeric fields, booleans for boolean fields
     const result: Partial<EnsembleConfig> = {}
+    if (raw.leadWaiter === "auto" || raw.leadWaiter === "always" || raw.leadWaiter === "off") result.leadWaiter = raw.leadWaiter
     if (typeof raw.mergeOnCleanup === "boolean") result.mergeOnCleanup = raw.mergeOnCleanup
     if (typeof raw.stallThresholdMs === "number") result.stallThresholdMs = raw.stallThresholdMs
     if (typeof raw.stallMinSteps === "number") result.stallMinSteps = raw.stallMinSteps

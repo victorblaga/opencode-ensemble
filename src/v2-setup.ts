@@ -7,7 +7,7 @@ import { deliverPrompt, type V2SessionPort } from "./v2-session"
 import type { V2Context } from "./v2-client"
 import { createV2Client } from "./v2-client"
 import { registerV2Tools } from "./v2-tools"
-import { wakeLeadIfPending } from "./wake"
+import { onLeadIdle, wakeLeadIfPending } from "./wake"
 import type { PluginClient, ToolDeps } from "./types"
 import { ProgressTracker } from "./progress"
 import { checkToolIsolation, shouldNudgeIdleMember } from "./hooks"
@@ -23,6 +23,7 @@ import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionCo
 import { startDashboard, type DashboardServer } from "./dashboard"
 import { EnsembleRpc, emitMemberEvent, emitNoticeEvent } from "./v2-rpc"
 import { isWorktreeInstance } from "./util"
+import { waiterRequired } from "./waiter"
 import { log } from "./log"
 
 /** V2 setup context subset (structural, mock-friendly). */
@@ -167,7 +168,11 @@ export async function setupEnsemble(
         db.run("UPDATE team SET lead_status = ? WHERE id = ?", [status, team.teamId])
       }
       if (status === "idle" && !interrupted && wakeClient) {
-        wakeLeadIfPending(wakeClient, db, team.teamId).catch((err) => {
+        const finishedTurn = event.type === "session.execution.succeeded" || event.type === "session.execution.failed"
+        const wake = finishedTurn
+          ? onLeadIdle(wakeClient, db, team.teamId, config)
+          : wakeLeadIfPending(wakeClient, db, team.teamId)
+        wake.catch((err) => {
           log(`wake-lead:failed err=${err instanceof Error ? err.message : String(err)}`)
         })
       }
@@ -313,7 +318,7 @@ export async function setupEnsemble(
     if (teamOwnership(db, teamInfo.teamId) !== "mine") return
     const prompt =
       teamInfo.role === "lead"
-        ? buildLeadSystemPrompt(db, teamInfo.teamId, config)
+        ? buildLeadSystemPrompt(db, teamInfo.teamId, config, true)
         : buildTeammateSystemPrompt(db, teamInfo.teamId, teamInfo.memberName ?? "unknown", config)
     log(`system-prompt:injected role=${teamInfo.role} len=${prompt.length}`)
     event.system.push({ type: "text", text: prompt })
@@ -346,7 +351,7 @@ export async function setupEnsemble(
   // API gains session scope — team tools and prompts carry identity instead.
   await ctx.shell.hook("create.before", () => undefined)
 
-  const client = createV2Client(ctx, rpc ? { rpcEmitter: rpc } : {})
+  const client = createV2Client(ctx, { rpcEmitter: rpc ?? undefined, leadWaiter: waiterRequired(config) })
   wakeClient = client
   const deps: ToolDeps = {
     v2: true,

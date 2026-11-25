@@ -67,6 +67,7 @@ export function agentRulesAreReadOnly(rules: unknown): boolean | undefined {
 
 /** Optional companion integration. */
 export interface V2ClientDeps {
+  leadWaiter?: boolean
   /** RPC emitter for companion events (team_view navigation). */
   rpcEmitter?: { events: { emit(name: string, data: unknown): Promise<unknown> } }
 }
@@ -148,6 +149,7 @@ export function createV2Client(ctx: V2Context, deps: V2ClientDeps = {}): PluginC
   }
 
   return {
+    leadWaiter: deps.leadWaiter ?? false,
     createIsolatedSession: async ({ parentID, name, title, permissions, signal }) => {
       const lead = await ctx.session.get({ sessionID: parentID }) as SessionInfo | undefined
       if (!lead?.location?.directory) throw new Error(`Lead session "${parentID}" has no worktree location`)
