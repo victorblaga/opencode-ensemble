@@ -633,8 +633,11 @@ async function cleanupV2Worktrees(
           if (!branch || branch === kept || !await branchExists(branch, directory)) continue
           const shared = db.query("SELECT 1 FROM team_member WHERE team_id != ? AND worktree_branch = ? LIMIT 1")
             .get(team.teamId, branch)
-          if (!owned.has(branch) || shared) {
-            remaining.push(`${name}: retained branch ${branch} because ownership is not exclusive to this team.`)
+          if (!owned.has(branch)) {
+            // Not created by Ensemble: leave it to the user and don't record it, so purge isn't blocked.
+            remaining.push(`${name}: left branch ${branch} in place because this team did not create it.`)
+          } else if (shared) {
+            remaining.push(`${name}: retained branch ${branch} because another team also records it.`)
             kept ??= branch
           } else if (!await delBranch(branch, directory)) {
             remaining.push(`${name}: could not delete branch ${branch}.`)

@@ -104,8 +104,7 @@ function enableWal(db: Database): void {
       db.exec("PRAGMA journal_mode=WAL")
       return
     } catch (error) {
-      const sqlite = error as { code?: string; errcode?: number }
-      if (attempt === 4 || (sqlite.code !== "SQLITE_BUSY" && sqlite.errcode !== 5)) throw error
+      if (attempt === 4 || (error as { code?: string }).code !== "SQLITE_BUSY") throw error
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
     }
   }

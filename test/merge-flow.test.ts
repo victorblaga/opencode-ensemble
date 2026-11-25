@@ -858,12 +858,13 @@ test("V2 resolves the worktree HEAD even when the stored preserved ref is stale"
   })
 })
 
-test("V2 cleanup reports and records a non-team branch without deleting it", async () => {
+test("V2 cleanup reports a non-team branch without deleting or recording it", async () => {
   await withV2Repo(async (deps, wt) => {
     await gitIn(wt, "branch", "-m", "feature/keep")
     deps.db.run("UPDATE team_member SET status = 'shutdown', worktree_branch = NULL")
-    expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain("retained branch feature/keep")
+    expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain("left branch feature/keep in place")
     expect(await gitIn(deps.directory, "branch", "--list", "feature/keep")).toContain("feature/keep")
-    expect(deps.db.query("SELECT worktree_branch FROM team_member").get()).toEqual({ worktree_branch: "feature/keep" })
+    // Recording it would block purge of this archived team for good.
+    expect(deps.db.query("SELECT worktree_branch FROM team_member").get()).toEqual({ worktree_branch: null })
   })
 })
