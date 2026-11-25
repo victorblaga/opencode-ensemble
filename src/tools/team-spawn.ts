@@ -6,6 +6,7 @@ import { notifyLead } from "../notify"
 import { releaseMemberTasks } from "../tasks"
 import { parseModelId, formatModelId, getSessionSelection } from "../member-model"
 import { log } from "../log"
+import { waiterCommand, waiterRequired } from "../waiter"
 import type { EnsembleConfig } from "../config"
 import { getTeamResourceParts, teamWorktreeName, preserveBranch, preservedBranchName } from "./merge-helper"
 
@@ -501,5 +502,9 @@ export async function executeTeamSpawn(
   // Reset circuit breaker on success
   spawnFailures.delete(teamInfo.teamId)
   log(`spawn:done name=${args.name} sessionId=${childSessionId}`)
-  return `Teammate "${args.name}" spawned (agent: ${agent})${branchInfo}${isolationInfo}${planInfo}${claimInfo}. They are working on: ${args.prompt.slice(0, 120)}${args.prompt.length > 120 ? "..." : ""}`
+  // Some providers drop plugin system-prompt additions; a tool result always reaches the lead.
+  const waiterInfo = deps.v2 && waiterRequired(deps.config)
+    ? ` Before ending your turn while teammates work, run \`${waiterCommand()}\` with the shell tool and background: true.`
+    : ""
+  return `Teammate "${args.name}" spawned (agent: ${agent})${branchInfo}${isolationInfo}${planInfo}${claimInfo}. They are working on: ${args.prompt.slice(0, 120)}${args.prompt.length > 120 ? "..." : ""}${waiterInfo}`
 }

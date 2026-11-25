@@ -380,6 +380,16 @@ describe("team_spawn", () => {
     expect(text).toContain("<summary>")
   })
 
+  test("V2 spawn result names the waiter command only when a waiter is required", async () => {
+    deps.v2 = true
+    deps.config = { ...deps.config, leadWaiter: "always" }
+    const hosted = await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "Fix" }, "lead-sess")
+    expect(hosted).toMatch(/run `python3 '[^']*\/bin\/ensemble-wait\.py'` with the shell tool and background: true/)
+    deps.config = { ...deps.config, leadWaiter: "off" }
+    const standalone = await executeTeamSpawn(deps, { name: "bob", agent: "build", prompt: "Fix" }, "lead-sess")
+    expect(standalone).not.toContain("ensemble-wait.py")
+  })
+
   test("V2 reviewer can claim and complete a task with edit, shell, questions and T3 tools denied", async () => {
     deps.v2 = true
     deps.db.run("INSERT INTO team_task (id, team_id, content, status, time_created, time_updated) VALUES ('review', 't1', 'review', 'pending', 1, 1)")
