@@ -46,12 +46,7 @@ done
 
 require_idle() {
   local status active
-  if pgrep -x 'opencode(\.exe)?' >/dev/null; then
-    die "Close OpenCode before changing the pin."
-  else
-    status=$?
-    [[ $status -eq 1 ]] || die "Could not check running OpenCode processes."
-  fi
+  # Match the full command line: names longer than 15 characters never match pgrep's default.
   if pgrep -f '^([^[:space:]]*/)?opencode(\.exe)?([[:space:]]|$)' >/dev/null; then
     die "Close OpenCode before changing the pin."
   else
