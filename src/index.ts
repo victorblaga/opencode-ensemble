@@ -611,7 +611,7 @@ const plugin: Plugin = async (input) => {
           const memberSessions = teamInfoForCleanup
             ? (db.query("SELECT session_id FROM team_member WHERE team_id = ?").all(teamInfoForCleanup.teamId) as Array<{ session_id: string }>).map(m => m.session_id)
             : []
-          const result = await executeTeamCleanup(deps, args, ctx.sessionID, undefined, undefined, undefined, config.mergeOnCleanup, undefined, approvePurge)
+          const result = await executeTeamCleanup(deps, args, ctx.sessionID, undefined, undefined, undefined, undefined, approvePurge)
           // Clean up activity buffers for team members after successful cleanup
           if (!result.includes("uncommitted") && !args.purge) {
             for (const sid of memberSessions) activityBuffer.remove(sid)

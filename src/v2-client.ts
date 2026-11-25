@@ -335,8 +335,9 @@ export function createV2Client(ctx: V2Context, deps: V2ClientDeps = {}): PluginC
     worktree: {
       create: async () => { throw new Error("V2 worktrees must be created with an isolated session") },
       remove: async (options) => {
-        const directory = (options.worktreeRemoveInput as { directory: string }).directory
-        return ctx.worktree.remove({ ...project(), directory, force: false })
+        const input = options.worktreeRemoveInput
+        if (!input) throw new Error("Worktree directory is required")
+        return ctx.worktree.remove({ ...project(), directory: input.directory, force: input.force ?? false })
       },
       list: async () => {
         const entries = await ctx.worktree.list(project())

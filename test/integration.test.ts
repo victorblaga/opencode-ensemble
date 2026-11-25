@@ -84,7 +84,7 @@ describe("integration: full team lifecycle", () => {
     }
     const noopMerge: MergeBranchFn = async () => ({ ok: true })
     const noopDelete: DeleteBranchFn = async () => true
-    const cleanupResult = await executeTeamCleanup(deps, { force: false }, leadSession, undefined, noopMerge, noopDelete, false)
+    const cleanupResult = await executeTeamCleanup(deps, { force: false }, leadSession, undefined, noopMerge, noopDelete)
     expect(cleanupResult).toContain("cleaned up")
 
     // Verify: team archived, no active members
@@ -404,7 +404,7 @@ describe("integration: race conditions and edge cases", () => {
     // Force cleanup while teammate is still "working"
     const noopMerge2: MergeBranchFn = async () => ({ ok: true })
     const noopDelete2: DeleteBranchFn = async () => true
-    await executeTeamCleanup(deps, { force: true }, leadSession, undefined, noopMerge2, noopDelete2, false)
+    await executeTeamCleanup(deps, { force: true }, leadSession, undefined, noopMerge2, noopDelete2)
 
     // Teammate tries to message lead after cleanup — team is archived
     await expect(

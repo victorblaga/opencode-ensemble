@@ -443,7 +443,7 @@ describe("cleanup safety net for unmerged branches", () => {
       return { ok: true }
     }
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, true, noopOverlap)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, noopOverlap)
     expect(result).toContain("Safety-net merged")
     expect(mergedBranches).toHaveLength(1)
     expect(mergedBranches[0]).toBe(preservedFor(deps, "safety-net", "alice"))
@@ -464,7 +464,7 @@ describe("cleanup safety net for unmerged branches", () => {
       return { ok: true }
     }
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, true, noopOverlap)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, noopOverlap)
     expect(result).toContain("cleaned up")
     expect(result).not.toContain("Safety-net")
     expect(mergeCalled).toBe(false)
@@ -475,7 +475,7 @@ describe("cleanup safety net for unmerged branches", () => {
     await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
     await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, failMerge, noopDelete, true, noopOverlap)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, failMerge, noopDelete, noopOverlap)
     expect(result).toContain("Could not auto-merge")
   })
 
@@ -490,7 +490,8 @@ describe("cleanup safety net for unmerged branches", () => {
       return { ok: true }
     }
 
-    await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, false, noopOverlap)
+    deps.config.mergeOnCleanup = false
+    await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, noopOverlap)
     expect(mergeCalled).toBe(false)
   })
 
@@ -510,7 +511,7 @@ describe("cleanup safety net for unmerged branches", () => {
       return { ok: true }
     }
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, true, noopOverlap)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, noopOverlap)
     expect(result).toContain("Safety-net merged 1 unmerged branch")
     expect(mergedBranches).toHaveLength(1)
     expect(mergedBranches[0]).toBe(preservedFor(deps, "mixed-merge", "bob"))
@@ -523,7 +524,7 @@ describe("cleanup safety net for unmerged branches", () => {
 
     const overlapFiles: OverlapCheckFn = async () => ["config.py", "conftest.py"]
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete, true, overlapFiles)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete, overlapFiles)
     expect(result).toContain("config.py")
     expect(result).toContain("overlap")
   })
@@ -577,7 +578,7 @@ describe("full merge lifecycle", () => {
       return { ok: true }
     }
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, true, noopOverlap)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, noopOverlap)
     expect(result).toContain("cleaned up")
     expect(result).not.toContain("Safety-net")
     expect(mergeCalled).toBe(false)
@@ -586,5 +587,178 @@ describe("full merge lifecycle", () => {
     const team = deps.db.query("SELECT status FROM team WHERE name = 'lifecycle'")
       .get() as { status: string }
     expect(team.status).toBe("archived")
+  })
+})
+
+async function gitIn(cwd: string, ...args: string[]): Promise<string> {
+  const { runCommand } = await import("../src/process")
+  const result = await runCommand(["git", ...args], { cwd })
+  if (result.exitCode !== 0) throw new Error(result.stderr)
+  return result.stdout.trim()
+}
+
+async function withV2Repo(run: (deps: Deps, wt: string, branch: string) => Promise<void>): Promise<void> {
+  const { mkdtemp, rm } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const { teamWorktreeName } = await import("../src/tools/merge-helper")
+  const root = await mkdtemp(join(tmpdir(), "ensemble-git-"))
+  const repo = join(root, "lead")
+  const wt = join(root, "worker")
+  const deps = setupDeps()
+  deps.directory = repo
+  deps.v2 = true
+  try {
+    await gitIn(root, "init", "--initial-branch=main", repo)
+    await gitIn(repo, "config", "user.name", "Ensemble Test")
+    await gitIn(repo, "config", "user.email", "test@example.invalid")
+    await Bun.write(join(repo, "common"), "base\n")
+    await gitIn(repo, "add", "--", "common")
+    await gitIn(repo, "commit", "-m", "base")
+    await executeTeamCreate(deps, { name: "test", project_name: "project" }, "lead")
+    const id = teamId(deps, "test")
+    const branch = teamWorktreeName("project", "test", id, "worker")
+    await gitIn(repo, "worktree", "add", "-b", branch, wt)
+    insertMember(deps.db, id, "worker", "worker", "ready")
+    deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ?", [wt, branch])
+    deps.client.worktree.remove = async ({ worktreeRemoveInput }) => {
+      const input = worktreeRemoveInput
+      if (!input) throw new Error("Missing worktree")
+      await gitIn(repo, "worktree", "remove", ...(input.force ? ["--force"] : []), input.directory)
+    }
+    await run(deps, wt, branch)
+  } finally {
+    deps.db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+test("V2 merges the final commit after a graceful shutdown and removes its own branch", async () => {
+  const { join } = await import("node:path")
+  const { handleSessionStatusEvent } = await import("../src/hooks")
+  await withV2Repo(async (deps, wt, branch) => {
+    deps.client.session.status = async () => ({ data: { worker: { type: "busy" } } })
+    await Bun.write(join(wt, "first"), "first")
+    await gitIn(wt, "add", ".")
+    await gitIn(wt, "commit", "-m", "first")
+    expect(await executeTeamShutdown(deps, { member: "worker" }, "lead")).toContain("Shutdown requested")
+    await Bun.write(join(wt, "last"), "last")
+    await gitIn(wt, "add", ".")
+    await gitIn(wt, "commit", "-m", "last")
+    deps.registry.register(teamId(deps, "test"), "worker", "worker")
+    handleSessionStatusEvent(deps.db, deps.registry, "worker", "idle")
+    deps.client.session.status = async () => ({ data: {} })
+    expect(await executeTeamMerge(deps, { member: "worker" }, "lead")).toContain("Merged worker")
+    expect(await Bun.file(join(deps.directory, "last")).text()).toBe("last")
+    expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain("nothing left")
+    expect(await gitIn(deps.directory, "branch", "--list", branch)).toBe("")
+    expect((await gitIn(deps.directory, "worktree", "list")).split("\n")).toHaveLength(1)
+  })
+})
+
+test("squash refuses a staged edit and rolls back only actual conflicts", async () => {
+  const { join } = await import("node:path")
+  const { mergeBranch } = await import("../src/tools/merge-helper")
+  await withV2Repo(async (deps, wt, branch) => {
+    const repo = deps.directory
+    await Bun.write(join(wt, "common"), "worker\n")
+    await gitIn(wt, "commit", "-am", "worker")
+    await Bun.write(join(repo, "common"), "lead\n")
+    await gitIn(repo, "commit", "-am", "lead")
+    await Bun.write(join(repo, "staged"), "keep")
+    await gitIn(repo, "add", "staged")
+    const staged = await gitIn(repo, "status", "--porcelain")
+    expect(await mergeBranch(branch, repo)).toMatchObject({ ok: false, error: expect.stringContaining("staged") })
+    expect(await gitIn(repo, "status", "--porcelain")).toBe(staged)
+    await gitIn(repo, "reset", "HEAD", "staged")
+    const before = await gitIn(repo, "status", "--porcelain")
+    expect(await mergeBranch(branch, repo)).toMatchObject({ ok: false, error: expect.stringContaining("CONFLICT") })
+    expect(await gitIn(repo, "status", "--porcelain")).toBe(before)
+    expect(await Bun.file(join(repo, "common")).text()).toBe("lead\n")
+    expect(await mergeBranch("missing-ref", repo)).toMatchObject({ ok: false })
+    expect(await gitIn(repo, "status", "--porcelain")).toBe(before)
+  })
+})
+
+test("V2 cleanup preserves the last commit when merging is disabled", async () => {
+  const { join } = await import("node:path")
+  await withV2Repo(async (deps, wt, branch) => {
+    deps.config.mergeOnCleanup = false
+    await Bun.write(join(wt, "last"), "keep")
+    await gitIn(wt, "add", ".")
+    await gitIn(wt, "commit", "-m", "final")
+    const head = await gitIn(wt, "rev-parse", "HEAD")
+    deps.db.run("UPDATE team_member SET status = 'shutdown'")
+    const preserved = preservedFor(deps, "test", "worker")
+    expect(await executeTeamCleanup(deps, { force: false }, "lead")).toContain(preserved)
+    expect(await gitIn(deps.directory, "rev-parse", preserved)).toBe(head)
+    expect(await gitIn(deps.directory, "branch", "--list", branch)).toBe("")
+    expect(await Bun.file(join(deps.directory, "last")).exists()).toBe(false)
+  })
+})
+
+test("V2 refuses to clean up an active shutdown request and keeps an unstoppable checkout", async () => {
+  const { existsSync } = await import("node:fs")
+  await withV2Repo(async (deps, wt) => {
+    deps.db.run("UPDATE team_member SET status = 'shutdown_requested'")
+    deps.client.session.status = async () => ({ data: { worker: { type: "busy" } } })
+    deps.client.session.abort = async () => { throw new Error("interrupt failed") }
+    expect(await executeTeamShutdown(deps, { member: "worker", force: true }, "lead")).toContain("interrupt failed")
+    expect(deps.db.query("SELECT status FROM team_member").get()).toEqual({ status: "shutdown_requested" })
+    await expect(executeTeamCleanup(deps, { force: false }, "lead")).rejects.toThrow("still active")
+    let interrupts = 0
+    deps.client.session.abort = async () => { interrupts++; return {} }
+    const result = await executeTeamCleanup(deps, { force: true }, "lead")
+    expect(interrupts).toBe(1)
+    expect(result).toContain("worker")
+    expect(result).toContain(wt)
+    expect(existsSync(wt)).toBe(true)
+  })
+})
+
+test("V2 cleanup reports a rejected worktree removal and archives the team", async () => {
+  const { existsSync } = await import("node:fs")
+  await withV2Repo(async (deps, wt, branch) => {
+    deps.db.run("UPDATE team_member SET status = 'shutdown'")
+    deps.db.run("UPDATE team_member SET worktree_branch = NULL")
+    await gitIn(deps.directory, "worktree", "lock", wt)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead")
+    expect(result).toContain(wt)
+    expect(result).toContain("locked")
+    expect(deps.db.query("SELECT worktree_branch FROM team_member").get()).toEqual({ worktree_branch: branch })
+    expect(result).not.toContain("nothing left")
+    expect(existsSync(wt)).toBe(true)
+    expect(await gitIn(deps.directory, "branch", "--list", branch)).toContain(branch)
+    expect(deps.db.query("SELECT status FROM team").get()).toEqual({ status: "archived" })
+  })
+})
+
+test("purge deletes only recorded refs even when a team name overlaps the project prefix", async () => {
+  await withV2Repo(async (deps) => {
+    const repo = deps.directory
+    const own = "ensemble/preserved/project/worker"
+    const nested = "ensemble/preserved/project/y#other/worker"
+    const unrecorded = "ensemble/preserved/project/old"
+    for (const ref of [own, nested, unrecorded]) await gitIn(repo, "branch", ref)
+    const { db } = deps
+    db.run("UPDATE team SET name = 'project', status = 'archived'")
+    db.run("UPDATE team_member SET worktree_branch = ?, worktree_dir = NULL, status = 'shutdown'", [own])
+    db.run("INSERT INTO team (id, project_id, name, lead_session_id, status, time_created, time_updated) VALUES ('other', ?, 'y', 'other-lead', 'archived', 1, 1)", [repo])
+    insertMember(db, "other", "worker", "other-worker", "shutdown")
+    db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = 'other'", [nested])
+    const args = { force: false, purge: ["project"] }
+    const preview = await executeTeamCleanup(deps, args, "caller")
+    const token = /Confirmation token: ([a-f0-9-]+)/.exec(preview)?.[1]
+    if (!token) throw new Error(preview)
+    const approval = deps.purgeApprovals.approvalLabel(token)
+    const denial = deps.purgeApprovals.denialLabel(token)
+    deps.purgeApprovals.recordQuestionAnswer("caller", `User has answered your questions: "Delete?"="${approval}".`, {
+      questions: [{ question: "Delete?", options: [{ label: approval }, { label: denial }] }],
+    })
+    expect(await executeTeamCleanup(deps, { ...args, confirm_purge: true, confirm_token: token }, "caller")).toContain("Permanently deleted 1")
+    expect(await gitIn(repo, "branch", "--list", own)).toBe("")
+    expect(await gitIn(repo, "branch", "--list", nested, unrecorded)).toContain(nested)
+    expect(await gitIn(repo, "branch", "--list", unrecorded)).toContain(unrecorded)
+    expect(db.query("SELECT id FROM team").all()).toEqual([{ id: "other" }])
   })
 })

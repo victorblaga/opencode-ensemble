@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import type { Database } from "../db"
 import { log } from "../log"
 import { runCommand } from "../process"
@@ -83,44 +85,55 @@ export async function preserveBranch(sourceBranch: string, targetBranch: string,
 export async function deleteBranch(branch: string, cwd: string): Promise<boolean> {
   const result = await runCommand(["git", "branch", "-D", branch], { cwd })
   if (result.exitCode !== 0) {
-    log(`merge-helper:delete:failed branch=${branch}`)
+    log(`merge-helper:delete:failed branch=${branch} err=${gitFailure(result)}`)
     return false
   }
   return true
 }
 
-/**
- * Raw squash merge of a single branch. No stash/pop — caller handles that.
- * Used by mergeBranch (single) and mergeMultipleBranches (batch).
- */
+/** Resolve the worker's final commit, or its stored ref if the checkout is gone. */
+export async function resolveMemberRef(member: { worktree_dir: string | null; worktree_branch: string | null }): Promise<string | undefined> {
+  if (!member.worktree_dir || !existsSync(join(member.worktree_dir, ".git"))) return member.worktree_branch ?? undefined
+  const result = await runCommand(["git", "rev-parse", "--verify", "HEAD"], { cwd: member.worktree_dir })
+  if (result.exitCode !== 0) throw new Error(`Cannot read worktree HEAD at ${member.worktree_dir}: ${gitFailure(result)}`)
+  return result.stdout.trim()
+}
+
+function gitFailure(result: { stdout: string; stderr: string; exitCode: number }): string {
+  return [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n") || `git exited with code ${result.exitCode}`
+}
+
+/** Squash into a clean index and repair conflicts without discarding prior edits. */
 export async function mergeBranchRaw(branch: string, cwd: string): Promise<MergeResult> {
-  const result = await runCommand(["git", "merge", "--squash", branch], { cwd })
+  const git = (...args: string[]) => runCommand(["git", ...args], { cwd })
+  const index = await git("diff", "--cached", "--name-only", "--")
+  if (index.exitCode !== 0) return { ok: false, error: `Could not check the index: ${gitFailure(index)}` }
+  if (index.stdout.trim()) return { ok: false, error: "The index has staged changes. Commit or unstage them before merging." }
 
-  if (result.exitCode !== 0) {
-    const stderr = result.stderr.trim()
-    log(`merge-helper:merge:conflict branch=${branch} err=${stderr}`)
-    await runCommand(["git", "merge", "--abort"], { cwd })
-    return { ok: false, error: stderr || `merge exited with code ${result.exitCode}` }
+  const result = await git("merge", "--squash", branch)
+  if (result.exitCode === 0) return { ok: true }
+
+  let error = gitFailure(result)
+  const unmerged = await git("ls-files", "-u")
+  if (unmerged.exitCode !== 0) {
+    error += `\nCould not check for conflicts: ${gitFailure(unmerged)}`
+  } else if (unmerged.stdout.trim()) {
+    const reset = await git("reset", "--merge")
+    if (reset.exitCode !== 0) error += `\nCould not undo the failed squash: ${gitFailure(reset)}`
   }
-
-  return { ok: true }
+  log(`merge-helper:merge:failed ref=${branch} err=${error}`)
+  return { ok: false, error }
 }
 
-/** Unstage all changes so merge results appear as unstaged. */
-export async function gitReset(cwd: string): Promise<void> {
-  await runCommand(["git", "reset", "HEAD"], { cwd })
-}
-
-/**
- * Squash merge a branch into the working directory as unstaged changes.
- * No stashing — existing unstaged changes from previous merges are preserved.
- * If the merge conflicts, the lead resolves it with git.
- */
+/** Squash a branch into the working directory as unstaged changes. */
 export async function mergeBranch(branch: string, cwd: string): Promise<MergeResult> {
   const result = await mergeBranchRaw(branch, cwd)
   if (!result.ok) return result
-  await gitReset(cwd)
-  return { ok: true }
+  const reset = await runCommand(["git", "reset", "HEAD"], { cwd })
+  if (reset.exitCode === 0) return { ok: true }
+  const error = `The squash is staged, but git reset HEAD failed: ${gitFailure(reset)}`
+  log(`merge-helper:reset:failed ref=${branch} err=${error}`)
+  return { ok: false, error }
 }
 
 /**

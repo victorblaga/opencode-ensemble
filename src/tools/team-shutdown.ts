@@ -1,7 +1,7 @@
-import type { ToolDeps } from "../types"
+import type { PluginClient, ToolDeps } from "../types"
 import { requireLead, checkWorktreeDirty, countBranchCommits } from "./shared"
 import type { IsDirtyFn, CommitCountFn } from "./shared"
-import { getTeamResourceParts, preserveBranch, preservedBranchName } from "./merge-helper"
+import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveMemberRef } from "./merge-helper"
 import type { PreserveBranchFn } from "./merge-helper"
 import { releaseMemberTasks } from "../tasks"
 import { log } from "../log"
@@ -29,33 +29,24 @@ export async function executeTeamShutdown(
 
   const force = args.force ?? false
 
-  // Second call on an already-requested member → force abort
-  if (member.status === "shutdown_requested") {
-    await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, preserve)
+  const alreadyRequested = member.status === "shutdown_requested"
+  const isIdle = await confirmStopped(deps.client, member.session_id)
+  if (alreadyRequested || isIdle || force) {
+    if (deps.v2) {
+      const error = await stopV2Member(deps, teamInfo.teamId, args.member, member.session_id)
+      if (error) return `Could not stop "${args.member}": ${error}`
+    } else {
+      await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, preserve)
+    }
     const status = await getBranchStatus(deps, teamInfo.teamId, args.member, member.worktree_dir, isDirty, commitCount)
-    return `Force shut down "${args.member}".${status}`
-  }
-
-  // Determine if member is idle or busy
-  let isIdle = false
-  try {
-    const statuses = await deps.client.session.status()
-    const sessionStatus = statuses.data?.[member.session_id]
-    isIdle = !sessionStatus || sessionStatus.type === "idle"
-  } catch {
-    // Status poll failed — assume busy, fall through to graceful path
-  }
-
-  if (isIdle || force) {
-    await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, preserve)
-    const status = await getBranchStatus(deps, teamInfo.teamId, args.member, member.worktree_dir, isDirty, commitCount)
-    return `Teammate "${args.member}" has been shut down.${status}`
+    const result = alreadyRequested ? `Force shut down "${args.member}".` : `Teammate "${args.member}" has been shut down.`
+    return result + status
   }
 
   // Busy + not force → graceful: preserve branch first, then send shutdown message
   // Branch must be preserved NOW — if the session crashes during shutdown_requested,
   // the worktree and branch could be lost before force-abort ever runs.
-  if (member.worktree_branch) {
+  if (!deps.v2 && member.worktree_branch) {
     const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.member)
     const ok = await preserve(member.worktree_branch, safeBranch, deps.directory)
@@ -86,6 +77,31 @@ export async function executeTeamShutdown(
   )
 
   return `Shutdown requested for ${args.member}. They will finish current work and shut down. Call team_shutdown with force: true to abort immediately.`
+}
+
+/** An unavailable active-set lookup cannot confirm that the writer stopped. */
+export async function confirmStopped(client: PluginClient, sessionId: string): Promise<boolean> {
+  try {
+    const { data } = await client.session.status()
+    const status = data?.[sessionId]
+    return !status || status.type === "idle"
+  } catch {
+    return false
+  }
+}
+
+export async function stopV2Member(deps: ToolDeps, teamId: string, name: string, sessionId: string): Promise<string | undefined> {
+  // V2 interrupt stops the session drain and leaves its Git worktree in place.
+  try {
+    await deps.client.session.abort({ sessionID: sessionId })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    log(`shutdown:interrupt-failed team=${teamId} member=${name} err=${message}`)
+    return message
+  }
+  if (!await confirmStopped(deps.client, sessionId)) return "OpenCode still reports the session active, or its status could not be confirmed."
+  recordShutdown(deps, teamId, name)
+  return undefined
 }
 
 /**
@@ -124,6 +140,10 @@ async function preserveAndAbort(
     // Abort failed — session may already be gone
   }
 
+  recordShutdown(deps, teamId, memberName)
+}
+
+function recordShutdown(deps: ToolDeps, teamId: string, memberName: string): void {
   deps.db.run(
     "UPDATE team_member SET status = 'shutdown', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ?",
     [Date.now(), teamId, memberName],
@@ -151,7 +171,8 @@ async function getBranchStatus(
   const branch = row.worktree_branch
   const parts: string[] = []
 
-  const commits = await commitCount(branch, deps.directory)
+  const ref = deps.v2 ? await resolveMemberRef({ worktree_dir: worktreeDir, worktree_branch: branch }) : branch
+  const commits = ref ? await commitCount(ref, deps.directory) : -1
   // Best-effort dirty check — worktree may already be deleted by session.abort() race
   const dirty = worktreeDir ? await isDirty(worktreeDir).catch(() => false) : false
 

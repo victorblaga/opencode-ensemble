@@ -7,7 +7,6 @@ import type { MergeBranchFn, DeleteBranchFn } from "../../src/tools/merge-helper
 /** Noop merge fn for tests that don't need real git. */
 const noopMerge: MergeBranchFn = async () => ({ ok: true })
 const noopDelete: DeleteBranchFn = async () => true
-const noopListBranches = async () => []
 /** Noop preserve fn for shutdown tests. */
 const noopPreserve = async () => true
 
@@ -46,7 +45,7 @@ function purgeQuestionArgs(approvalLabel: string, denialLabel: string) {
 }
 
 async function preparePurgeConfirmation(deps: ReturnType<typeof setupDeps>, purge: string[], sessionId = "main-sess"): Promise<string> {
-  const preview = await executeTeamCleanup(deps, { force: false, purge }, sessionId, undefined, noopMerge, noopDelete, false, undefined, undefined, noopListBranches)
+  const preview = await executeTeamCleanup(deps, { force: false, purge }, sessionId, undefined, noopMerge, noopDelete)
   const token = extractConfirmToken(preview)
   const approvalLabel = deps.purgeApprovals.approvalLabel(token)
   const denialLabel = deps.purgeApprovals.denialLabel(token)
@@ -285,7 +284,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
 
     const team = deps.db.query("SELECT status FROM team WHERE id = ?").get("t1") as Record<string, string>
@@ -299,7 +298,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
     deps.registry.register("t1", "alice", "sess-alice")
 
-    await expect(executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false))
+    await expect(executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete))
       .rejects.toThrow("still active")
   })
 
@@ -309,7 +308,7 @@ describe("team_cleanup", () => {
     deps.registry.register("t1", "alice", "sess-alice")
     deps.registry.register("t1", "bob", "sess-bob")
 
-    const result = await executeTeamCleanup(deps, { force: true }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: true }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
 
     const abortCalls = deps.client.calls.filter(c => c.method === "session.abort")
@@ -323,17 +322,17 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.registry.register("t1", "alice", "sess-alice")
 
-    await expect(executeTeamCleanup(deps, { force: false }, "sess-alice", undefined, noopMerge, noopDelete, false))
+    await expect(executeTeamCleanup(deps, { force: false }, "sess-alice", undefined, noopMerge, noopDelete))
       .rejects.toThrow("Only the team lead")
   })
 
   test("works with no members", async () => {
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
   })
 
   test("treats empty purge array as normal cleanup", async () => {
-    const result = await executeTeamCleanup(deps, { force: false, purge: [] }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false, purge: [] }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
 
     const team = deps.db.query("SELECT status FROM team WHERE id = ?").get("t1") as Record<string, string>
@@ -344,7 +343,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown_requested", "idle")
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
 
     const team = deps.db.query("SELECT status FROM team WHERE id = ?").get("t1") as Record<string, string>
@@ -355,7 +354,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "error", "failed")
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
 
     const team = deps.db.query("SELECT status FROM team WHERE id = ?").get("t1") as Record<string, string>
@@ -370,7 +369,7 @@ describe("team_cleanup", () => {
       ["/tmp/worktree-alice", "ensemble-my-team-alice"])
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
 
     const removeCalls = deps.client.calls.filter(c => c.method === "worktree.remove")
@@ -385,7 +384,7 @@ describe("team_cleanup", () => {
 
     deps.client.worktree.remove = async () => { throw new Error("worktree gone") }
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
   })
 
@@ -393,7 +392,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
   })
 
@@ -403,7 +402,7 @@ describe("team_cleanup", () => {
       ["/tmp/worktree-alice", "ensemble-my-team-alice"])
     deps.registry.register("t1", "alice", "sess-alice")
 
-    await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
 
     const row = deps.db.query("SELECT worktree_dir FROM team_member WHERE name = 'alice'").get() as { worktree_dir: string | null }
     expect(row.worktree_dir).toBeNull()
@@ -415,7 +414,7 @@ describe("team_cleanup", () => {
       ["/tmp/worktree-alice", "ensemble-my-team-alice", "ws-alice-123"])
     deps.registry.register("t1", "alice", "sess-alice")
 
-    await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
 
     const wsRemoveCalls = deps.client.calls.filter(c => c.method === "workspace.remove")
     expect(wsRemoveCalls).toHaveLength(1)
@@ -428,7 +427,7 @@ describe("team_cleanup", () => {
       ["/tmp/worktree-alice", "ensemble-my-team-alice", "ws-alice-123"])
     deps.registry.register("t1", "alice", "sess-alice")
 
-    await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
 
     const row = deps.db.query("SELECT workspace_id FROM team_member WHERE name = 'alice'").get() as { workspace_id: string | null }
     expect(row.workspace_id).toBeNull()
@@ -442,7 +441,7 @@ describe("team_cleanup", () => {
 
     deps.client.workspace.remove = async () => { throw new Error("workspace gone") }
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
   })
 
@@ -456,7 +455,7 @@ describe("team_cleanup", () => {
     deps.registry.register("t1", "alice", "sess-alice")
     deps.registry.register("t1", "bob", "sess-bob")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
 
     const removeCalls = deps.client.calls.filter(c => c.method === "worktree.remove")
@@ -471,7 +470,7 @@ describe("team_cleanup", () => {
       ["/tmp/wt-alice", "ensemble-my-team-alice"])
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", async () => true, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", async () => true, noopMerge, noopDelete)
 
     // Should warn, NOT remove worktree, NOT archive team
     expect(result).toContain("uncommitted")
@@ -491,7 +490,7 @@ describe("team_cleanup", () => {
       ["/tmp/wt-alice", "ensemble-my-team-alice"])
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: true }, "lead-sess", async () => true, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: true }, "lead-sess", async () => true, noopMerge, noopDelete)
 
     // Dirty check runs BEFORE abort — sessions should NOT be aborted
     const abortCalls = deps.client.calls.filter(c => c.method === "session.abort")
@@ -513,7 +512,7 @@ describe("team_cleanup", () => {
       ["/tmp/wt-alice", "ensemble-my-team-alice"])
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false, acknowledge_uncommitted: true }, "lead-sess", async () => true, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false, acknowledge_uncommitted: true }, "lead-sess", async () => true, noopMerge, noopDelete)
 
     expect(result).toContain("cleaned up")
 
@@ -530,7 +529,7 @@ describe("team_cleanup", () => {
       ["/tmp/wt-alice", "ensemble-my-team-alice"])
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", async () => false, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", async () => false, noopMerge, noopDelete)
 
     expect(result).toContain("cleaned up")
 
@@ -546,7 +545,7 @@ describe("team_cleanup", () => {
     insertTask(deps.db, "old-1", "task-old-1")
     insertMessage(deps.db, "old-1", "msg-old-1")
 
-    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {})
 
     expect(result).toContain("Purge preview")
     expect(result).toContain("Use the question tool")
@@ -558,7 +557,7 @@ describe("team_cleanup", () => {
   test("confirmed purge rejects without a confirmation token even when approval callback is available", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {}))
       .rejects.toThrow("confirmation token")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -566,10 +565,10 @@ describe("team_cleanup", () => {
 
   test("confirmed purge rejects if the question tool was not used after preview", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
-    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, undefined, noopListBranches)
+    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete)
     const token = extractConfirmToken(preview)
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {}))
       .rejects.toThrow("approved")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -577,12 +576,12 @@ describe("team_cleanup", () => {
 
   test("confirmed purge rejects if the user selected the denial answer", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
-    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, undefined, noopListBranches)
+    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete)
     const token = extractConfirmToken(preview)
 
     deps.purgeApprovals.recordQuestionAnswer("main-sess", `User has answered your questions: "Delete?"="${deps.purgeApprovals.denialLabel(token)}".`, purgeQuestionArgs(deps.purgeApprovals.approvalLabel(token), deps.purgeApprovals.denialLabel(token)))
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {}))
       .rejects.toThrow("approved")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -595,7 +594,7 @@ describe("team_cleanup", () => {
     insertMessage(deps.db, "old-1", "msg-old-1")
     const token = await preparePurgeConfirmation(deps, ["old-team"])
 
-    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {})
 
     expect(result).toContain("Permanently deleted 1 archived team")
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).toBeNull()
@@ -615,7 +614,7 @@ describe("team_cleanup", () => {
     deps.db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/other-project", "old-3"])
     const token = await preparePurgeConfirmation(deps, ["*"], "lead-sess")
 
-    const result = await executeTeamCleanup(deps, { force: false, purge: ["*"], confirm_purge: true, confirm_token: token }, "lead-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["*"], confirm_purge: true, confirm_token: token }, "lead-sess", undefined, noopMerge, noopDelete, undefined, async () => {})
 
     expect(result).toContain("Permanently deleted 2 archived teams")
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).toBeNull()
@@ -629,7 +628,7 @@ describe("team_cleanup", () => {
     const token = await preparePurgeConfirmation(deps, ["*"], "lead-sess")
     insertTeam(deps.db, "old-2", "old-two", "old-lead-2", "archived")
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["*"], confirm_purge: true, confirm_token: token }, "lead-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["*"], confirm_purge: true, confirm_token: token }, "lead-sess", undefined, noopMerge, noopDelete, undefined, async () => {}))
       .rejects.toThrow("confirmation token")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -639,7 +638,7 @@ describe("team_cleanup", () => {
   test("purge rejects wildcard mixed with explicit team names", async () => {
     insertTeam(deps.db, "old-1", "old-one", "old-lead-1", "archived")
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["*", "my-team"] }, "lead-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["*", "my-team"] }, "lead-sess", undefined, noopMerge, noopDelete, undefined, async () => {}))
       .rejects.toThrow("Wildcard purge cannot be combined")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -649,7 +648,7 @@ describe("team_cleanup", () => {
   test("purge rejects active teams and leaves archived targets untouched", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team", "my-team"] }, "main-sess", undefined, noopMerge, noopDelete, false))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team", "my-team"] }, "main-sess", undefined, noopMerge, noopDelete))
       .rejects.toThrow("Cannot purge active team")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -660,7 +659,7 @@ describe("team_cleanup", () => {
   test("purge rejects missing teams and leaves valid archived targets untouched", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team", "missing-team"] }, "main-sess", undefined, noopMerge, noopDelete, false))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team", "missing-team"] }, "main-sess", undefined, noopMerge, noopDelete))
       .rejects.toThrow("Team not found")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -676,7 +675,7 @@ describe("team_cleanup", () => {
     deps.db.run("UPDATE team SET name = ?, project_id = ? WHERE id = ?", ["old-team", "/tmp/other-project", "old-2"])
     const token = await preparePurgeConfirmation(deps, ["old-team"], "main-sess")
 
-    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {})
 
     expect(result).toContain("Permanently deleted 1 archived team")
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).toBeNull()
@@ -688,7 +687,7 @@ describe("team_cleanup", () => {
     deps.registry.register("t1", "alice", "sess-alice")
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "sess-alice", undefined, noopMerge, noopDelete, false))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "sess-alice", undefined, noopMerge, noopDelete))
       .rejects.toThrow("Team members cannot purge archived teams")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -697,7 +696,7 @@ describe("team_cleanup", () => {
   test("purge without confirmation returns preview and leaves archived team intact", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
 
-    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {})
 
     expect(result).toContain("Purge preview")
     expect(result).toContain("Use the question tool")
@@ -707,7 +706,7 @@ describe("team_cleanup", () => {
 
   test("purge denial answer deletes nothing", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
-    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, undefined, noopListBranches)
+    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete)
     const token = extractConfirmToken(preview)
     deps.purgeApprovals.recordQuestionAnswer("main-sess", `User has answered your questions: "Delete?"="${deps.purgeApprovals.denialLabel(token)}".`, purgeQuestionArgs(deps.purgeApprovals.approvalLabel(token), deps.purgeApprovals.denialLabel(token)))
 
@@ -717,11 +716,7 @@ describe("team_cleanup", () => {
       "main-sess",
       undefined,
       noopMerge,
-      noopDelete,
-      false,
-      undefined,
-      undefined,
-      noopListBranches
+      noopDelete
     )).rejects.toThrow("approved")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -733,7 +728,7 @@ describe("team_cleanup", () => {
     insertTask(deps.db, "old-1", "task-old-1")
     insertMessage(deps.db, "old-1", "msg-old-1")
 
-    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, undefined, noopListBranches)
+    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete)
 
     expect(preview).toContain("Permanently delete archived teams")
     expect(preview).toContain("old-team")
@@ -745,6 +740,10 @@ describe("team_cleanup", () => {
   test("purge preview pluralizes branch counts correctly", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
 
+    insertMember(deps.db, "old-1", "bob", "old-bob", "shutdown")
+    deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = 'old-1' AND name = ?", ["ensemble/preserved/old-team/bob", "bob"])
+    insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown")
+    deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = 'old-1' AND name = ?", ["ensemble/preserved/old-team/alice", "alice"])
     const preview = await executeTeamCleanup(
       deps,
       { force: false, purge: ["old-team"] },
@@ -752,10 +751,9 @@ describe("team_cleanup", () => {
       undefined,
       noopMerge,
       noopDelete,
-      false,
       undefined,
       undefined,
-      async () => ["ensemble/preserved/old-team/alice", "ensemble/preserved/old-team/bob"],
+      async () => true,
     )
 
     expect(preview).toContain("2 preserved branches")
@@ -763,10 +761,12 @@ describe("team_cleanup", () => {
     expect(preview).not.toContain("branchs")
   })
 
-  test("purge blocks if preserved branch listing fails", async () => {
+  test("purge blocks if preserved branch lookup fails", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
     const token = await preparePurgeConfirmation(deps, ["old-team"])
 
+    insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'ensemble/preserved/old-team/alice' WHERE team_id = 'old-1'")
     await expect(executeTeamCleanup(
       deps,
       { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token },
@@ -774,11 +774,10 @@ describe("team_cleanup", () => {
       undefined,
       noopMerge,
       noopDelete,
-      false,
       undefined,
-      async () => {},
+      undefined,
       async () => { throw new Error("git failed") }
-    )).rejects.toThrow("Failed to list preserved branches")
+    )).rejects.toThrow("git failed")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
   })
@@ -794,10 +793,8 @@ describe("team_cleanup", () => {
       undefined,
       noopMerge,
       noopDelete,
-      false,
       undefined,
-      async () => {},
-      async () => { throw new Error("fatal: not a git repository (or any of the parent directories): .git") }
+      async () => {}
     )
 
     expect(result).toContain("Permanently deleted 1 archived team")
@@ -815,11 +812,7 @@ describe("team_cleanup", () => {
       "main-sess",
       undefined,
       noopMerge,
-      noopDelete,
-      false,
-      undefined,
-      undefined,
-      noopListBranches
+      noopDelete
     )).rejects.toThrow("Cannot purge active team")
 
     const team = deps.db.query("SELECT status FROM team WHERE id = 'old-1'").get() as { status: string }
@@ -842,11 +835,7 @@ describe("team_cleanup", () => {
       "main-sess",
       undefined,
       noopMerge,
-      noopDelete,
-      false,
-      undefined,
-      undefined,
-      noopListBranches
+      noopDelete
     )
 
     expect(result).toContain("Permanently deleted 1 archived team")
@@ -859,7 +848,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ? WHERE team_id = 'old-1' AND name = 'alice'", ["/tmp/wt-alice"])
 
-    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {})
 
     expect(result).toContain("Purge preview")
     expect(result).toContain("1 stale resource")
@@ -871,7 +860,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET workspace_id = ? WHERE team_id = 'old-1' AND name = 'alice'", ["ws-alice"])
 
-    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {})
 
     expect(result).toContain("Purge preview")
     expect(result).toContain("1 stale resource")
@@ -886,7 +875,7 @@ describe("team_cleanup", () => {
     deps.client.worktree.remove = async () => { throw new Error("remove failed") }
     const token = await preparePurgeConfirmation(deps, ["old-team"])
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, undefined, noopListBranches))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete))
       .rejects.toThrow("Failed to remove stale worktree")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -899,7 +888,7 @@ describe("team_cleanup", () => {
     deps.client.worktree.list = async () => ({ data: [{ name: "ensemble-old-team-alice", branch: "ensemble-old-team-alice", directory: "/tmp/wt-alice" }] })
     const token = await preparePurgeConfirmation(deps, ["old-team"])
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", async () => true, noopMerge, noopDelete, false, undefined, undefined, noopListBranches))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", async () => true, noopMerge, noopDelete))
       .rejects.toThrow("uncommitted changes")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -913,7 +902,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, workspace_id = ? WHERE team_id = 'old-1' AND name = 'alice'", ["/tmp/shared-wt", "ws-shared"])
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, undefined, noopListBranches))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete))
       .rejects.toThrow("referenced by active team")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -924,7 +913,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = 'old-1' AND name = 'alice'", ["feature/alice"])
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {}))
       .rejects.toThrow("non-preserved worktree branch")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -935,7 +924,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = 'old-1' AND name = 'alice'", ["opencode/ensemble-old-team-alice"])
 
-    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {})
 
     expect(result).toContain("Purge preview")
     expect(result).toContain("1 stale branch")
@@ -956,10 +945,8 @@ describe("team_cleanup", () => {
       undefined,
       noopMerge,
       async (branch) => { deleted.push(branch); return true },
-      false,
       undefined,
       undefined,
-      noopListBranches,
       async () => true,
     )
 
@@ -981,10 +968,8 @@ describe("team_cleanup", () => {
       undefined,
       noopMerge,
       async () => false,
-      false,
       undefined,
       undefined,
-      noopListBranches,
       async () => true,
     )).rejects.toThrow("Failed to delete stale Ensemble branch")
 
@@ -996,7 +981,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = 'old-1' AND name = 'alice'", ["ensemble/preserved/other-team/alice"])
 
-    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}))
+    await expect(executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, undefined, async () => {}))
       .rejects.toThrow("outside its preserved namespace")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
@@ -1004,8 +989,12 @@ describe("team_cleanup", () => {
 
   test("purge deletes only preserved branches for the target team", async () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
+    insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown")
+    deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = 'old-1' AND name = ?", ["ensemble/preserved/old-team/alice", "alice"])
     const deleted: string[] = []
-    const token = await preparePurgeConfirmation(deps, ["old-team"])
+    const preview = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, undefined, undefined, async () => true)
+    const token = extractConfirmToken(preview)
+    deps.purgeApprovals.recordQuestionAnswer("main-sess", `User has answered your questions: "Delete?"="${deps.purgeApprovals.approvalLabel(token)}".`, purgeQuestionArgs(deps.purgeApprovals.approvalLabel(token), deps.purgeApprovals.denialLabel(token)))
 
     await executeTeamCleanup(
       deps,
@@ -1014,10 +1003,9 @@ describe("team_cleanup", () => {
       undefined,
       noopMerge,
       async (branch) => { deleted.push(branch); return true },
-      false,
       undefined,
-      async () => {},
-      async () => ["ensemble/preserved/old-team/alice", "feature/unrelated", "ensemble/preserved/other-team/bob"]
+      undefined,
+      async () => true
     )
 
     expect(deleted).toEqual(["ensemble/preserved/old-team/alice"])
@@ -1027,6 +1015,8 @@ describe("team_cleanup", () => {
     insertTeam(deps.db, "old-1", "old-team", "old-lead", "archived")
     const token = await preparePurgeConfirmation(deps, ["old-team"])
 
+    insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'ensemble/preserved/old-team/alice' WHERE team_id = 'old-1'")
     await expect(executeTeamCleanup(
       deps,
       { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token },
@@ -1034,10 +1024,9 @@ describe("team_cleanup", () => {
       undefined,
       noopMerge,
       async () => false,
-      false,
       undefined,
-      async () => {},
-      async () => ["ensemble/preserved/old-team/alice"]
+      undefined,
+      async () => true
     )).rejects.toThrow("Failed to delete preserved branch")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()

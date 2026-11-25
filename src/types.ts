@@ -87,7 +87,7 @@ export interface PluginClient {
   }
   worktree: {
     create(options: { worktreeCreateInput?: { name?: string; startCommand?: string } }): Promise<{ data?: { name: string; branch: string; directory: string } }>
-    remove(options: { worktreeRemoveInput?: { directory: string } }): Promise<unknown>
+    remove(options: { worktreeRemoveInput?: { directory: string; force?: boolean } }): Promise<unknown>
     list(): Promise<{ data?: Array<{ name: string; branch: string; directory: string }> }>
     reset(options: { worktreeResetInput?: { directory: string } }): Promise<unknown>
   }

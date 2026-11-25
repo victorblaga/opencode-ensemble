@@ -1,8 +1,9 @@
 import type { ToolDeps } from "../types"
 import { requireLead, checkWorktreeDirty, countBranchCommits } from "./shared"
 import type { IsDirtyFn, CommitCountFn } from "./shared"
-import { mergeBranch, deleteBranch, getOverlappingFiles } from "./merge-helper"
+import { mergeBranch, deleteBranch, getOverlappingFiles, resolveMemberRef } from "./merge-helper"
 import type { MergeBranchFn, DeleteBranchFn, OverlapCheckFn } from "./merge-helper"
+import { confirmStopped } from "./team-shutdown"
 import { log } from "../log"
 
 /**
@@ -21,8 +22,8 @@ export async function executeTeamMerge(
 ): Promise<string> {
   const teamInfo = requireLead(deps, sessionId)
 
-  const member = deps.db.query("SELECT status, worktree_branch, worktree_dir FROM team_member WHERE team_id = ? AND name = ?")
-    .get(teamInfo.teamId, args.member) as { status: string; worktree_branch: string | null; worktree_dir: string | null } | null
+  const member = deps.db.query("SELECT status, session_id, worktree_branch, worktree_dir FROM team_member WHERE team_id = ? AND name = ?")
+    .get(teamInfo.teamId, args.member) as { status: string; session_id: string; worktree_branch: string | null; worktree_dir: string | null } | null
   if (!member) throw new Error(`Teammate "${args.member}" not found in team "${teamInfo.teamName}"`)
 
   if (member.status !== "shutdown" && member.status !== "error") {
@@ -33,7 +34,13 @@ export async function executeTeamMerge(
     throw new Error(`No branch to merge for "${args.member}". They may not have a worktree, or their work was already merged.`)
   }
 
+  if (deps.v2) {
+    if (!await confirmStopped(deps.client, member.session_id)) {
+      throw new Error(`Could not confirm teammate "${args.member}" has stopped. Retry team_shutdown before merging.`)
+    }
+  }
   const branch = member.worktree_branch
+  const ref = deps.v2 ? (await resolveMemberRef(member) ?? branch) : branch
   log(`merge:start member=${args.member} branch=${branch}`)
 
   // A branch with zero new commits produces a trivially "successful" no-op squash merge --
@@ -45,7 +52,7 @@ export async function executeTeamMerge(
   // A commit-count check failure returns -1 (unknown) -- never treat that as "nothing to
   // merge"; fall through to the real merge attempt so a check failure can't silently skip
   // real work.
-  const commits = await commitCount(branch, deps.directory)
+  const commits = await commitCount(ref, deps.directory)
   if (commits === 0) {
     const dirty = member.worktree_dir ? await isDirty(member.worktree_dir).catch(() => false) : false
     if (dirty) {
@@ -62,7 +69,7 @@ export async function executeTeamMerge(
 
   // Block merge if lead has local changes to files the agent also modified
   try {
-    const overlap = await overlapCheck(branch, deps.directory)
+    const overlap = await overlapCheck(ref, deps.directory)
     if (overlap.length > 0) {
       const files = overlap.map(f => `  - ${f}`).join("\n")
       return [
@@ -77,12 +84,12 @@ export async function executeTeamMerge(
     log(`merge:overlap-check:failed member=${args.member} branch=${branch}`)
   }
 
-  const result = await merge(branch, deps.directory)
+  const result = await merge(ref, deps.directory)
   if (!result.ok) {
     return [
-      `Merge conflict merging ${args.member}'s branch (${branch}).`,
+      deps.v2 ? `Could not merge ${args.member}'s work (${ref}).` : `Merge conflict merging ${args.member}'s branch (${branch}).`,
       `Resolve manually:`,
-      `  git merge --squash ${branch}`,
+      `  git merge --squash ${ref}`,
       `  git reset HEAD`,
       ``,
       `Error: ${result.error}`,
@@ -90,7 +97,11 @@ export async function executeTeamMerge(
   }
 
   // Merge succeeded — delete the preserved branch and clear DB
-  await delBranch(branch, deps.directory)
+  const shouldDelete = !deps.v2 || !member.worktree_dir || branch.startsWith("ensemble/preserved/")
+  const deleted = !shouldDelete || await delBranch(branch, deps.directory)
+  if (!deleted && deps.v2) {
+    return `Applied ${args.member}'s changes, but failed to delete branch ${branch}. Review the unstaged changes with git diff.`
+  }
   deps.db.run(
     "UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?",
     [teamInfo.teamId, args.member],

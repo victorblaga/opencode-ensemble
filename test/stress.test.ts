@@ -121,7 +121,7 @@ describe("stress: auto-merge on cleanup", () => {
       return { ok: true }
     }
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, true)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete)
     expect(result).toContain("Safety-net merged 2 unmerged branch")
     expect(mergedBranches).toHaveLength(2)
 
@@ -143,7 +143,7 @@ describe("stress: auto-merge on cleanup", () => {
       return mixedCallCount === 1 ? { ok: true } : { ok: false, error: "conflict" }
     }
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, mixedMerge, noopDelete, true)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, mixedMerge, noopDelete)
     expect(result).toContain("Safety-net merged 1 unmerged branch")
     expect(result).toContain("Could not auto-merge")
   })
@@ -154,7 +154,7 @@ describe("stress: auto-merge on cleanup", () => {
     await executeTeamSpawn(deps, { name: "x", agent: "build", prompt: "t" }, lead)
     deps.db.run("UPDATE team_member SET status = 'shutdown' WHERE team_id = ?", [teamId])
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, failMerge, noopDelete, true)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, failMerge, noopDelete)
     expect(result).toContain("Could not auto-merge")
     expect(result).not.toContain("Merged")
   })
@@ -165,7 +165,7 @@ describe("stress: auto-merge on cleanup", () => {
     await executeTeamSpawn(deps, { name: "y", agent: "build", prompt: "t" }, lead)
     deps.db.run("UPDATE team_member SET status = 'shutdown' WHERE team_id = ?", [teamId])
 
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete)
   })
 })
 
@@ -229,7 +229,7 @@ describe("stress: spawn circuit breaker", () => {
     const teamId = getTeamId(deps, "cleanup-breaker")
     spawnFailures.set(teamId, { count: 3, lastError: "stuck" })
 
-    await executeTeamCleanup(deps, { force: true }, lead, undefined, noopMerge, noopDelete, false)
+    await executeTeamCleanup(deps, { force: true }, lead, undefined, noopMerge, noopDelete)
     expect(spawnFailures.has(teamId)).toBe(false)
   })
 })
@@ -630,7 +630,7 @@ describe("stress: full lifecycle with all v0.8.0 features", () => {
       return { ok: true }
     }
     // Members don't have worktree branches (worktree: false), so no merge happens
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, true)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete)
     expect(result).toContain("cleaned up")
 
     // 10. Team is archived, all tasks completed
@@ -827,7 +827,7 @@ describe("stress: completion loop prevention (issue #3)", () => {
     for (const name of ["alice", "bob", "carol"]) {
       await executeTeamShutdown(deps, { member: name, force: true }, lead)
     }
-    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete, false)
+    const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete)
     expect(result).toContain("cleaned up")
   })
 
@@ -905,7 +905,7 @@ describe("stress: read-only agents skip worktree through full lifecycle", () => 
     await executeTeamShutdown(deps, { member: "researcher", force: true }, lead)
 
     // Cleanup — no merge needed, no worktree to remove
-    const result2 = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete, true)
+    const result2 = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete)
     expect(result2).toContain("cleaned up")
 
     const wtRemoves = deps.client.calls.filter(c => c.method === "worktree.remove")
