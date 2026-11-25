@@ -4,7 +4,7 @@ Use these gates to prevent common coordination failures.
 
 ## Pre-Spawn Checklist
 
-- The user goal is one sentence.
+- The user goal is clear and the shared baseline is committed in the lead checkout.
 - The task is large enough to justify coordination overhead.
 - Each teammate has one clear owner area.
 - No two builders are expected to edit the same files.
@@ -19,14 +19,14 @@ If more than two items are unknown, spawn one scout first.
 
 - Call `team_create` before `team_spawn`.
 - Add shared tasks with `team_tasks_add` before assigning task IDs.
-- Spawn teammates one at a time and wait for each tool result.
+- Spawn teammates one at a time with an explicit model and task ID. Wait for each tool result.
 - Keep teammate prompts focused and under one clear responsibility.
 - Tell teammates what to report, not just what to do.
 - Do not describe lead-only tools in teammate prompts.
 
 ## While Running Checklist
 
-- Wait for `team_message` updates instead of polling `team_status` repeatedly.
+- Follow the [waiter procedure](../SKILL.md#waiting-for-teammates) when the lead ends its turn with teammates still working.
 - Use `team_results` for full content when a message is truncated or consequential.
 - Forward relevant findings between teammates when it changes their work.
 - Reject unclear plans instead of approving them under time pressure.
@@ -35,18 +35,18 @@ If more than two items are unknown, spawn one scout first.
 ## Merge Checklist
 
 - Read the teammate's task result.
-- Shut down the teammate with `team_shutdown`.
+- Request `team_shutdown` after the report and confirm it completed.
 - If shutdown warns about uncommitted changes, resolve that before merging.
-- Merge with `team_merge`, not manual git commands.
+- Check that the Git index is clean, then merge with `team_merge`.
 - Inspect `git diff` after each merge.
 - If two branches overlap in surprising files, review before merging the next branch.
 
 ## Cleanup Checklist
 
-- All active teammates are complete, shut down, or intentionally force-stopped.
+- All teammate shutdowns are confirmed.
 - Relevant teammate branches have been merged or deliberately left out.
 - Verification commands have passed or blockers are clearly reported.
-- `team_cleanup` has run after review and verification.
+- `team_cleanup` has run after review and verification. Read its result for worktrees and branches left behind.
 - Final user summary includes what changed, tests run, and any residual risks.
 
 ## Verification Checklist

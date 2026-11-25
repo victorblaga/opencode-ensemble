@@ -117,7 +117,7 @@ team_results({ from: "qa" })
 team_shutdown({ member: "qa" })
 team_merge({ member: "qa" })
 
-team_spawn({ name: "reviewer", agent: "explore", worktree: false, claim_task: "task_jkl012", prompt: "Review the merged diff for correctness, missed tests, and risky behavior. Do not edit files." })
+team_spawn({ name: "reviewer", agent: "explore", worktree: false, model: "openai/gpt-5-mini", claim_task: "task_jkl012", prompt: "Review the merged diff for correctness, missed tests, and risky behavior. Do not edit files." })
 ```
 
 The lead runs the repository verification commands, summarizes the result, and only then cleans up the team. All merged teammate changes remain in your working directory as unstaged changes for review with `git diff`.
@@ -140,9 +140,15 @@ Good team shapes:
 - **Parallel slices**: two or three `build` agents own independent files or vertical slices, then one reviewer checks the combined result.
 - **Risky change**: use `plan_approval: true` on the implementing teammate, then approve or reject the plan through `team_message` before edits begin.
 
+## Running under T3 Code
+
+Launch an OpenCode lead in a T3 project rooted at the target Git checkout. The [Ensemble Swarm launcher](skills-drafts/ensemble-swarm/SKILL.md) sets up the lead, workers, and review. When teammates are working, the lead runs the exact waiter command in its system prompt using `shell` with `background: true`, then ends its turn. The waiter keeps the managed server available and resumes the lead when the team needs attention. Use session tools for team operations and keep OpenCode CLI commands out of agent shells.
+
+To switch an existing local pin, close OpenCode and finish all active teams. From the fork, run `scripts/install-pin.sh --check <git-ref>`, then `scripts/install-pin.sh <git-ref>` to build and switch the pin and install both skills. Keep the previous pin and the printed rollback folder through acceptance. During acceptance, with OpenCode closed and teams inactive, `scripts/install-pin.sh --rollback <folder>` restores the configuration, skills, and database snapshot.
+
 ## Dashboard
 
-A real-time mission control dashboard runs at `http://localhost:4747` while OpenCode is active.
+The dashboard is at `http://127.0.0.1:4747`. On OpenCode V2, a process starts it when it hosts a team. Logs are at `$XDG_STATE_HOME/opencode-ensemble/ensemble.log` (default `~/.local/state/opencode-ensemble/ensemble.log`).
 
 ![Ensemble Dashboard](docs/dashboard.png)
 
@@ -418,6 +424,7 @@ All fields are optional. Missing fields use defaults.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `mergeOnCleanup` | `true` | Auto-merge worktree branches on cleanup (squash + unstage) |
+| `leadWaiter` | `"auto"` | On V2, show waiter instructions and reminders under T3. Use `"always"` on other hosts or `"off"` to disable guidance. |
 | `stallThresholdMs` | `300000` (5 min) | Time without communication before stall escalation. `0` disables. |
 | `stallMinSteps` | `5` | Min model steps before token-based stall check kicks in |
 | `stallTokenThreshold` | `200` | Output tokens per step below which the agent is considered stalled |
